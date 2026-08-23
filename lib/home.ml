@@ -121,9 +121,6 @@ module Home = struct
 
   type msg =
     | Load
-    | Select_worktree of string
-    | Back
-    | Run_claude of string option
     | Error of string
     | Worktrees_msg of Worktrees.msg
     | Worktree_msg of Worktree.msg
@@ -155,19 +152,15 @@ module Home = struct
     match (screen, message) with
     | Worktrees model, Load -> update_worktrees model Worktrees.Load
     | Worktree model, Load -> update_worktree model Worktree.Clear_error
-    | Worktrees model, Select_worktree path ->
-        update_worktrees model (Worktrees.Select path)
-    | Worktree model, Back -> update_worktree model Worktree.Back
-    | Worktree model, Run_claude value ->
-        update_worktree model (Worktree.Run value)
     | Worktrees model, Worktrees_msg message -> update_worktrees model message
     | Worktree model, Worktree_msg message -> update_worktree model message
-    | Worktrees model, Run_claude _ ->
+    | Worktrees model, Worktree_msg Worktree.Back ->
+        ({ screen = Worktrees model }, Cmd.none)
+    | Worktrees model, Worktree_msg (Worktree.Run _) ->
         update_worktrees model
           (Worktrees.Error "Command requires a selected worktree")
-    | Worktree model, Select_worktree _ | Worktree model, Worktrees_msg _ ->
+    | Worktree model, Worktrees_msg _ ->
         update_worktree model (Worktree.Error "Unknown event")
-    | Worktrees model, Back -> ({ screen = Worktrees model }, Cmd.none)
     | Worktrees model, Worktree_msg _ ->
         update_worktrees model (Worktrees.Error "Unknown event")
     | Worktrees model, Error error ->
@@ -201,10 +194,12 @@ let decode body =
             | Some (`String "load") -> Ok Home.Load
             | Some (`String "select_worktree") -> (
                 match field "path" event with
-                | Some (`String path) -> Ok (Home.Select_worktree path)
+                | Some (`String path) ->
+                    Ok (Home.Worktrees_msg (Worktrees.Select path))
                 | _ -> Ok (Home.Error "Invalid worktree event"))
-            | Some (`String "back") -> Ok Home.Back
-            | Some (`String "run_claude") -> Ok (Home.Run_claude value)
+            | Some (`String "back") -> Ok (Home.Worktree_msg Worktree.Back)
+            | Some (`String "run_claude") ->
+                Ok (Home.Worktree_msg (Worktree.Run value))
             | _ -> Ok (Home.Error "Unknown event"))
         | _ -> Error "Invalid event request")
     | _ -> Error "Invalid event request"

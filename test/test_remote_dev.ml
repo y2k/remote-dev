@@ -109,7 +109,7 @@ let () =
           Remote_dev.Home.Home.Worktree
             (Remote_dev.Home.Worktree.initial "/tmp/clicked");
       }
-      Remote_dev.Home.Home.Back
+      (Remote_dev.Home.Home.Worktree_msg Remote_dev.Home.Worktree.Back)
   in
   assert (
     match next.screen with
