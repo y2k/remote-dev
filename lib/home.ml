@@ -11,6 +11,32 @@ module Cmd = struct
   let map f cmd () = Option.map f (cmd ())
 end
 
+module Route = struct
+  type t = Worktrees | Worktree of string
+end
+
+type request = { event : (string * J.t) list; value : string option }
+
+let field name fields = List.assoc_opt name fields
+
+let decode_request body =
+  try
+    match J.from_string body with
+    | `Assoc fields -> (
+        match (field "event" fields, field "value" fields) with
+        | Some (`Assoc event), Some ((`Null | `String _) as value) ->
+            Ok
+              {
+                event;
+                value =
+                  (match value with
+                  | `String value -> Some value
+                  | `Null -> None);
+              }
+        | _ -> Error "Invalid event request")
+    | _ -> Error "Invalid event request"
+  with Yojson.Json_error _ -> Error "Invalid event request"
+
 module Worktrees = struct
   type model = { worktrees : Runtime.worktree list; error : string option }
 
@@ -18,9 +44,8 @@ module Worktrees = struct
     | Load
     | Loaded of (Runtime.worktree list, string) result
     | Select of string
+    | Ignore
     | Error of string
-
-  type action = Stay | Open of string
 
   let initial = { worktrees = []; error = None }
 
@@ -53,12 +78,28 @@ module Worktrees = struct
     try Some (Loaded (Ok (Runtime.load_worktrees (root ()))))
     with exn -> Some (Loaded (Error (Printexc.to_string exn)))
 
+  let enter () = (initial, load)
+
+  let decode { event; _ } =
+    match field "type" event with
+    | Some (`String "load") -> Load
+    | Some (`String "select_worktree") -> (
+        match field "path" event with
+        | Some (`String path) -> Select path
+        | _ -> Error "Invalid worktree event")
+    | Some (`String "back") -> Ignore
+    | Some (`String "run_claude") ->
+        Error "Command requires a selected worktree"
+    | _ -> Error "Unknown event"
+
   let update model = function
-    | Load -> ({ model with error = None }, load, Stay)
-    | Loaded (Ok worktrees) -> ({ worktrees; error = None }, Cmd.none, Stay)
-    | Loaded (Error error) -> ({ model with error = Some error }, Cmd.none, Stay)
-    | Select path -> ({ model with error = None }, Cmd.none, Open path)
-    | Error error -> ({ model with error = Some error }, Cmd.none, Stay)
+    | Load -> ({ model with error = None }, load, None)
+    | Loaded (Ok worktrees) -> ({ worktrees; error = None }, Cmd.none, None)
+    | Loaded (Error error) -> ({ model with error = Some error }, Cmd.none, None)
+    | Select path ->
+        ({ model with error = None }, Cmd.none, Some (Route.Worktree path))
+    | Ignore -> (model, Cmd.none, None)
+    | Error error -> ({ model with error = Some error }, Cmd.none, None)
 end
 
 module Worktree = struct
@@ -70,8 +111,6 @@ module Worktree = struct
     | Finished of (string, string) result
     | Back
     | Error of string
-
-  type action = Stay | Back_to_worktrees
 
   let initial path = { path; output = None; error = None }
 
@@ -99,31 +138,35 @@ module Worktree = struct
     try Some (Finished (Ok (Runtime.run_claude path prompt)))
     with exn -> Some (Finished (Error (Printexc.to_string exn)))
 
+  let enter path = (initial path, Cmd.none)
+
+  let decode { event; value } =
+    match field "type" event with
+    | Some (`String "load") -> Clear_error
+    | Some (`String "back") -> Back
+    | Some (`String "run_claude") -> Run value
+    | _ -> Error "Unknown event"
+
   let update model = function
-    | Clear_error -> ({ model with error = None }, Cmd.none, Stay)
+    | Clear_error -> ({ model with error = None }, Cmd.none, None)
     | Run (Some prompt) ->
-        ({ model with error = None }, run model.path prompt, Stay)
+        ({ model with error = None }, run model.path prompt, None)
     | Run None ->
         ( { model with error = Some "Command event requires a value" },
           Cmd.none,
-          Stay )
+          None )
     | Finished (Ok output) ->
-        ({ model with output = Some output; error = None }, Cmd.none, Stay)
+        ({ model with output = Some output; error = None }, Cmd.none, None)
     | Finished (Error error) ->
-        ({ model with error = Some error }, Cmd.none, Stay)
-    | Back -> ({ model with error = None }, Cmd.none, Back_to_worktrees)
-    | Error error -> ({ model with error = Some error }, Cmd.none, Stay)
+        ({ model with error = Some error }, Cmd.none, None)
+    | Back -> ({ model with error = None }, Cmd.none, Some Route.Worktrees)
+    | Error error -> ({ model with error = Some error }, Cmd.none, None)
 end
 
 module Home = struct
   type screen = Worktrees of Worktrees.model | Worktree of Worktree.model
   type state = { screen : screen }
-
-  type msg =
-    | Load
-    | Error of string
-    | Worktrees_msg of Worktrees.msg
-    | Worktree_msg of Worktree.msg
+  type msg = Worktrees_msg of Worktrees.msg | Worktree_msg of Worktree.msg
 
   let document { screen } =
     match screen with
@@ -133,40 +176,36 @@ module Home = struct
   let lift_worktrees = Cmd.map (fun message -> Worktrees_msg message)
   let lift_worktree = Cmd.map (fun message -> Worktree_msg message)
 
-  let update_worktrees model message =
-    let model, cmd, action = Worktrees.update model message in
-    match action with
-    | Worktrees.Open path ->
-        ({ screen = Worktree (Worktree.initial path) }, Cmd.none)
-    | Worktrees.Stay -> ({ screen = Worktrees model }, lift_worktrees cmd)
+  let enter = function
+    | Route.Worktrees ->
+        let model, cmd = Worktrees.enter () in
+        ({ screen = Worktrees model }, lift_worktrees cmd)
+    | Route.Worktree path ->
+        let model, cmd = Worktree.enter path in
+        ({ screen = Worktree model }, lift_worktree cmd)
 
-  let load_worktrees () = update_worktrees Worktrees.initial Worktrees.Load
-
-  let update_worktree model message =
-    let model, cmd, action = Worktree.update model message in
-    match action with
-    | Worktree.Back_to_worktrees -> load_worktrees ()
-    | Worktree.Stay -> ({ screen = Worktree model }, lift_worktree cmd)
+  let update_page screen lift update model message =
+    let model, cmd, route = update model message in
+    match route with
+    | Some route -> enter route
+    | None -> ({ screen = screen model }, lift cmd)
 
   let update { screen } message =
     match (screen, message) with
-    | Worktrees model, Load -> update_worktrees model Worktrees.Load
-    | Worktree model, Load -> update_worktree model Worktree.Clear_error
-    | Worktrees model, Worktrees_msg message -> update_worktrees model message
-    | Worktree model, Worktree_msg message -> update_worktree model message
-    | Worktrees model, Worktree_msg Worktree.Back ->
-        ({ screen = Worktrees model }, Cmd.none)
-    | Worktrees model, Worktree_msg (Worktree.Run _) ->
-        update_worktrees model
-          (Worktrees.Error "Command requires a selected worktree")
-    | Worktree model, Worktrees_msg _ ->
-        update_worktree model (Worktree.Error "Unknown event")
-    | Worktrees model, Worktree_msg _ ->
-        update_worktrees model (Worktrees.Error "Unknown event")
-    | Worktrees model, Error error ->
-        update_worktrees model (Worktrees.Error error)
-    | Worktree model, Error error ->
-        update_worktree model (Worktree.Error error)
+    | Worktrees model, Worktrees_msg message ->
+        update_page
+          (fun model -> Worktrees model)
+          lift_worktrees Worktrees.update model message
+    | Worktree model, Worktree_msg message ->
+        update_page
+          (fun model -> Worktree model)
+          lift_worktree Worktree.update model message
+    | _ -> ({ screen }, Cmd.none)
+
+  let decode { screen } request =
+    match screen with
+    | Worktrees _ -> Worktrees_msg (Worktrees.decode request)
+    | Worktree _ -> Worktree_msg (Worktree.decode request)
 end
 
 let state = Atomic.make { Home.screen = Home.Worktrees Worktrees.initial }
@@ -179,31 +218,8 @@ let rec dispatch message =
   Atomic.set state next;
   match cmd () with None -> next | Some message -> dispatch message
 
-let field name fields = List.assoc_opt name fields
-
 let decode body =
-  try
-    match J.from_string body with
-    | `Assoc fields -> (
-        match (field "event" fields, field "value" fields) with
-        | Some (`Assoc event), Some ((`Null | `String _) as value) -> (
-            let value =
-              match value with `String value -> Some value | `Null -> None
-            in
-            match field "type" event with
-            | Some (`String "load") -> Ok Home.Load
-            | Some (`String "select_worktree") -> (
-                match field "path" event with
-                | Some (`String path) ->
-                    Ok (Home.Worktrees_msg (Worktrees.Select path))
-                | _ -> Ok (Home.Error "Invalid worktree event"))
-            | Some (`String "back") -> Ok (Home.Worktree_msg Worktree.Back)
-            | Some (`String "run_claude") ->
-                Ok (Home.Worktree_msg (Worktree.Run value))
-            | _ -> Ok (Home.Error "Unknown event"))
-        | _ -> Error "Invalid event request")
-    | _ -> Error "Invalid event request"
-  with Yojson.Json_error _ -> Error "Invalid event request"
+  Result.map (Home.decode (Atomic.get state)) (decode_request body)
 
 let response body =
   match decode body with

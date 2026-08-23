@@ -41,6 +41,11 @@ let () =
       (fun () -> Some "child")
       ()
     = Some "home:child");
+  let _, _, route =
+    Remote_dev.Home.Worktrees.update Remote_dev.Home.Worktrees.initial
+      (Remote_dev.Home.Worktrees.Select "/tmp/clicked")
+  in
+  assert (route = Some (Remote_dev.Home.Route.Worktree "/tmp/clicked"));
   let next, cmd =
     Remote_dev.Home.Home.update
       {
@@ -49,6 +54,20 @@ let () =
       }
       (Remote_dev.Home.Home.Worktrees_msg
          (Remote_dev.Home.Worktrees.Loaded (Ok [])))
+  in
+  assert (cmd () = None);
+  assert (
+    match next.screen with
+    | Remote_dev.Home.Home.Worktrees { worktrees = []; error = None } -> true
+    | Remote_dev.Home.Home.Worktrees _ | Remote_dev.Home.Home.Worktree _ ->
+        false);
+  let next, cmd =
+    Remote_dev.Home.Home.update
+      {
+        screen =
+          Remote_dev.Home.Home.Worktrees Remote_dev.Home.Worktrees.initial;
+      }
+      (Remote_dev.Home.Home.Worktree_msg Remote_dev.Home.Worktree.Back)
   in
   assert (cmd () = None);
   assert (
@@ -83,6 +102,30 @@ let () =
   in
   assert (
     Remote_dev.Home.Home.document document
+    = Remote_dev.Home.Worktree.view
+        { path = "/tmp/clicked"; output = Some "answer"; error = None });
+  let status, body, _ =
+    Remote_dev.Server.response
+      ~body:(event [ ("type", `String "run_claude") ] `Null)
+      `POST "/"
+  in
+  assert (status = `OK);
+  assert (
+    Yojson.Basic.from_string body
+    = Remote_dev.Home.Worktree.view
+        {
+          path = "/tmp/clicked";
+          output = Some "answer";
+          error = Some "Command event requires a value";
+        });
+  let status, body, _ =
+    Remote_dev.Server.response
+      ~body:(event [ ("type", `String "load") ] `Null)
+      `POST "/"
+  in
+  assert (status = `OK);
+  assert (
+    Yojson.Basic.from_string body
     = Remote_dev.Home.Worktree.view
         { path = "/tmp/clicked"; output = Some "answer"; error = None });
 
@@ -133,11 +176,11 @@ let () =
     | Remote_dev.Home.Home.Worktrees _ -> true
     | Remote_dev.Home.Home.Worktree _ -> false);
   let model = Remote_dev.Home.Worktree.initial "/tmp/clicked" in
-  let model, _cmd, action =
+  let model, _cmd, route =
     Remote_dev.Home.Worktree.update model
       (Remote_dev.Home.Worktree.Run (Some "prompt"))
   in
-  assert (action = Remote_dev.Home.Worktree.Stay);
+  assert (route = None);
   let model, _cmd, _ =
     Remote_dev.Home.Worktree.update model
       (Remote_dev.Home.Worktree.Finished (Ok "answer"))
