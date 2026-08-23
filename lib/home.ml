@@ -98,22 +98,31 @@ module Worktrees = struct
 end
 
 module Worktree = struct
-  type model = { path : string; output : string option; error : string option }
-  type action = Run_claude
+  type model = {
+    path : string;
+    prompt : string;
+    output : string option;
+    error : string option;
+  }
+
+  type action = Run_claude | Set_prompt of string
 
   type msg =
     | Clear_error
     | Run of string option
+    | Prompt_selected of string
     | Finished of (string, string) result
     | Back
     | Error of string
 
-  let initial path = { path; output = None; error = None }
+  let initial path = { path; prompt = ""; output = None; error = None }
 
   let encode_action = function
     | Run_claude -> event [ ("type", `String "run_claude") ]
+    | Set_prompt prompt ->
+        event [ ("type", `String "set_prompt"); ("prompt", `String prompt) ]
 
-  let view { path; output; error } : action Components.t =
+  let view { path; prompt; output; error } : action Components.t =
     let messages =
       match output with Some output -> [ text output ] | None -> []
     in
@@ -124,8 +133,13 @@ module Worktree = struct
           row [ text "Path:"; text path ];
           column messages;
           row
-            [ button "/igor-pending-reviews"; button "/igor-restart-mr-tests" ];
-          edit ~event:Run_claude "Command2";
+            [
+              button ~event:(Set_prompt "/igor-pending-reviews")
+                "/igor-pending-reviews";
+              button ~event:(Set_prompt "/igor-restart-mr-tests")
+                "/igor-restart-mr-tests";
+            ];
+          edit ~text:prompt ~event:Run_claude "Commands";
         ]
     in
     match error with
@@ -144,6 +158,10 @@ module Worktree = struct
     | Some (`String "load") -> Clear_error
     | Some (`String "back") -> Back
     | Some (`String "run_claude") -> Run value
+    | Some (`String "set_prompt") -> (
+        match field "prompt" event with
+        | Some (`String prompt) -> Prompt_selected prompt
+        | _ -> Error "Invalid prompt shortcut event")
     | _ -> Error "Unknown event"
 
   let update model = function
@@ -154,6 +172,8 @@ module Worktree = struct
         ( { model with error = Some "Command event requires a value" },
           Cmd.none,
           None )
+    | Prompt_selected prompt ->
+        ({ model with prompt; error = None }, Cmd.none, None)
     | Finished (Ok output) ->
         ({ model with output = Some output; error = None }, Cmd.none, None)
     | Finished (Error error) ->

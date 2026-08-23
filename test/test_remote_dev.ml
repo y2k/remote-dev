@@ -107,7 +107,26 @@ let () =
   assert (
     has_event
       (`Assoc [ ("type", `String "run_claude") ])
-      (worktree_document { path = "/tmp/clicked"; output = None; error = None }));
+      (worktree_document
+         { path = "/tmp/clicked"; prompt = ""; output = None; error = None }));
+  assert (
+    has_event
+      (`Assoc
+         [
+           ("type", `String "set_prompt");
+           ("prompt", `String "/igor-pending-reviews");
+         ])
+      (worktree_document
+         { path = "/tmp/clicked"; prompt = ""; output = None; error = None }));
+  assert (
+    has_event
+      (`Assoc
+         [
+           ("type", `String "set_prompt");
+           ("prompt", `String "/igor-restart-mr-tests");
+         ])
+      (worktree_document
+         { path = "/tmp/clicked"; prompt = ""; output = None; error = None }));
   assert (Remote_dev.Home.Cmd.none () = None);
   assert (
     Remote_dev.Home.Cmd.map
@@ -166,8 +185,51 @@ let () =
   let worktree = Yojson.Basic.from_string body in
   assert (
     worktree
-    = worktree_document { path = "/tmp/clicked"; output = None; error = None });
+    = worktree_document
+        { path = "/tmp/clicked"; prompt = ""; output = None; error = None });
   assert (not (has_event (`Assoc [ ("type", `String "back") ]) worktree));
+  let status, body, _ =
+    Remote_dev.Server.response
+      ~body:
+        (event
+           [
+             ("type", `String "set_prompt");
+             ("prompt", `String "/igor-pending-reviews");
+           ]
+           `Null)
+      `POST "/"
+  in
+  assert (status = `OK);
+  assert (
+    Yojson.Basic.from_string body
+    = worktree_document
+        {
+          path = "/tmp/clicked";
+          prompt = "/igor-pending-reviews";
+          output = None;
+          error = None;
+        });
+  let status, body, _ =
+    Remote_dev.Server.response
+      ~body:
+        (event
+           [
+             ("type", `String "set_prompt");
+             ("prompt", `String "/igor-restart-mr-tests");
+           ]
+           `Null)
+      `POST "/"
+  in
+  assert (status = `OK);
+  assert (
+    Yojson.Basic.from_string body
+    = worktree_document
+        {
+          path = "/tmp/clicked";
+          prompt = "/igor-restart-mr-tests";
+          output = None;
+          error = None;
+        });
   let document =
     Remote_dev.Home.dispatch
       (Remote_dev.Home.Home.Worktree_msg
@@ -176,7 +238,12 @@ let () =
   assert (
     Remote_dev.Home.Home.to_json document
     = worktree_document
-        { path = "/tmp/clicked"; output = Some "answer"; error = None });
+        {
+          path = "/tmp/clicked";
+          prompt = "/igor-restart-mr-tests";
+          output = Some "answer";
+          error = None;
+        });
   let status, body, _ =
     Remote_dev.Server.response
       ~body:(event [ ("type", `String "run_claude") ] `Null)
@@ -188,6 +255,7 @@ let () =
     = worktree_document
         {
           path = "/tmp/clicked";
+          prompt = "/igor-restart-mr-tests";
           output = Some "answer";
           error = Some "Command event requires a value";
         });
@@ -200,7 +268,12 @@ let () =
   assert (
     Yojson.Basic.from_string body
     = worktree_document
-        { path = "/tmp/clicked"; output = Some "answer"; error = None });
+        {
+          path = "/tmp/clicked";
+          prompt = "/igor-restart-mr-tests";
+          output = Some "answer";
+          error = None;
+        });
 
   let status, _, _ = Remote_dev.Server.response `GET "/" in
   assert (status = `Not_found);
