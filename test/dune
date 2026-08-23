@@ -1,0 +1,9 @@
+(test
+ (name test_runtime)
+ (modules test_runtime)
+ (libraries remote_dev unix))
+
+(test
+ (name test_remote_dev)
+ (modules test_remote_dev)
+ (libraries remote_dev yojson))

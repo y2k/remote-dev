@@ -1,0 +1,3 @@
+(library
+ (name remote_dev)
+ (libraries eio httpun httpun-eio unix yojson))

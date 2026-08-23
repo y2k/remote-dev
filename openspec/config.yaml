@@ -1,0 +1,14 @@
+schema: spec-driven
+
+rules:
+  proposal:
+    - Write all narrative content in Russian; preserve required OpenSpec headings and technical identifiers.
+  design:
+    - Write all narrative content in Russian; preserve required OpenSpec headings and technical identifiers.
+  tasks:
+    - Write all content in English.
+
+operations:
+  apply:
+    guidance:
+      - Run `dune fmt` after modifying `.ml` files.

@@ -1,0 +1,4 @@
+(executable
+ (public_name remote_dev)
+ (name main)
+ (libraries eio_main remote_dev))
