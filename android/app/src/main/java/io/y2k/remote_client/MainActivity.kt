@@ -44,9 +44,6 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
-// ponytail: fixed development address; add runtime configuration when environments multiply.
-private const val backendUrl = "http://192.168.0.15:8080/"
-
 sealed interface UiNode {
     data class Column(val children: List<UiNode>) : UiNode
 
@@ -199,7 +196,7 @@ private fun App(client: HttpClient) {
                     ScreenState.Content(
                         parseUiNode(
                             client
-                                .post(backendUrl) {
+                                .post(BuildConfig.BACKEND_URL) {
                                     contentType(io.ktor.http.ContentType.Application.Json)
                                     setBody(eventRequest(event, value))
                                 }
