@@ -324,7 +324,8 @@ let () =
   let model = Remote_dev.Home.Worktree.initial "/tmp/clicked" in
   let model, _cmd, route =
     Remote_dev.Home.Worktree.update model
-      (Remote_dev.Home.Worktree.Run (Some "prompt"))
+      (Remote_dev.Home.Worktree.Event
+         (Remote_dev.Home.Worktree.Run_claude, Some "prompt"))
   in
   assert (route = None);
   let model, _cmd, _ =

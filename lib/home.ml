@@ -109,8 +109,7 @@ module Worktree = struct
 
   type msg =
     | Clear_error
-    | Run of string option
-    | Prompt_selected of string
+    | Event of action * string option
     | Finished of (string, string) result
     | Back
     | Error of string
@@ -157,22 +156,22 @@ module Worktree = struct
     match field "type" event with
     | Some (`String "load") -> Clear_error
     | Some (`String "back") -> Back
-    | Some (`String "run_claude") -> Run value
+    | Some (`String "run_claude") -> Event (Run_claude, value)
     | Some (`String "set_prompt") -> (
         match field "prompt" event with
-        | Some (`String prompt) -> Prompt_selected prompt
+        | Some (`String prompt) -> Event (Set_prompt prompt, value)
         | _ -> Error "Invalid prompt shortcut event")
     | _ -> Error "Unknown event"
 
   let update model = function
     | Clear_error -> ({ model with error = None }, Cmd.none, None)
-    | Run (Some prompt) ->
+    | Event (Run_claude, Some prompt) ->
         ({ model with error = None }, run model.path prompt, None)
-    | Run None ->
+    | Event (Run_claude, None) ->
         ( { model with error = Some "Command event requires a value" },
           Cmd.none,
           None )
-    | Prompt_selected prompt ->
+    | Event (Set_prompt prompt, _) ->
         ({ model with prompt; error = None }, Cmd.none, None)
     | Finished (Ok output) ->
         ({ model with output = Some output; error = None }, Cmd.none, None)
