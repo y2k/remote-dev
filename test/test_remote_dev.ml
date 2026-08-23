@@ -160,7 +160,7 @@ let () =
         screen =
           Remote_dev.Home.Home.Worktrees Remote_dev.Home.Worktrees.initial;
       }
-      (Remote_dev.Home.Home.Worktree_msg Remote_dev.Home.Worktree.Back)
+      Remote_dev.Home.Home.Back
   in
   assert (cmd () = None);
   assert (
@@ -274,6 +274,17 @@ let () =
           output = Some "answer";
           error = None;
         });
+  let status, body, _ =
+    Remote_dev.Server.response
+      ~body:(event [ ("type", `String "back") ] `Null)
+      `POST "/"
+  in
+  assert (status = `OK);
+  assert (
+    match (Atomic.get Remote_dev.Home.state).screen with
+    | Remote_dev.Home.Home.Worktrees model ->
+        Yojson.Basic.from_string body = worktrees_document model
+    | Remote_dev.Home.Home.Worktree _ -> false);
 
   let status, _, _ = Remote_dev.Server.response `GET "/" in
   assert (status = `Not_found);
@@ -298,7 +309,7 @@ let () =
           Remote_dev.Home.Home.Worktree
             (Remote_dev.Home.Worktree.initial "/tmp/clicked");
       }
-      (Remote_dev.Home.Home.Worktree_msg Remote_dev.Home.Worktree.Back)
+      Remote_dev.Home.Home.Back
   in
   assert (
     match next.screen with

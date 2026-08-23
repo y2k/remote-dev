@@ -45,7 +45,6 @@ module Worktrees = struct
     | Load
     | Loaded of (Runtime.worktree list, string) result
     | Select of string
-    | Ignore
     | Error of string
 
   let initial = { worktrees = []; error = None }
@@ -82,7 +81,6 @@ module Worktrees = struct
         match field "path" event with
         | Some (`String path) -> Select path
         | _ -> Error "Invalid worktree event")
-    | Some (`String "back") -> Ignore
     | Some (`String "run_claude") ->
         Error "Command requires a selected worktree"
     | _ -> Error "Unknown event"
@@ -93,7 +91,6 @@ module Worktrees = struct
     | Loaded (Error error) -> ({ model with error = Some error }, Cmd.none, None)
     | Select path ->
         ({ model with error = None }, Cmd.none, Some (Route.Worktree path))
-    | Ignore -> (model, Cmd.none, None)
     | Error error -> ({ model with error = Some error }, Cmd.none, None)
 end
 
@@ -111,7 +108,6 @@ module Worktree = struct
     | Clear_error
     | Event of action * string option
     | Finished of (string, string) result
-    | Back
     | Error of string
 
   let initial path = { path; prompt = ""; output = None; error = None }
@@ -155,7 +151,6 @@ module Worktree = struct
   let decode { event; value } =
     match field "type" event with
     | Some (`String "load") -> Clear_error
-    | Some (`String "back") -> Back
     | Some (`String "run_claude") -> Event (Run_claude, value)
     | Some (`String "set_prompt") -> (
         match field "prompt" event with
@@ -177,14 +172,17 @@ module Worktree = struct
         ({ model with output = Some output; error = None }, Cmd.none, None)
     | Finished (Error error) ->
         ({ model with error = Some error }, Cmd.none, None)
-    | Back -> ({ model with error = None }, Cmd.none, Some Route.Worktrees)
     | Error error -> ({ model with error = Some error }, Cmd.none, None)
 end
 
 module Home = struct
   type screen = Worktrees of Worktrees.model | Worktree of Worktree.model
   type state = { screen : screen }
-  type msg = Worktrees_msg of Worktrees.msg | Worktree_msg of Worktree.msg
+
+  type msg =
+    | Back
+    | Worktrees_msg of Worktrees.msg
+    | Worktree_msg of Worktree.msg
 
   type event =
     | Worktrees_event of Worktrees.action
@@ -223,6 +221,8 @@ module Home = struct
 
   let update { screen } message =
     match (screen, message) with
+    | Worktrees _, Back -> ({ screen }, Cmd.none)
+    | Worktree _, Back -> enter Route.Worktrees
     | Worktrees model, Worktrees_msg message ->
         update_page
           (fun model -> Worktrees model)
@@ -234,9 +234,12 @@ module Home = struct
     | _ -> ({ screen }, Cmd.none)
 
   let decode { screen } request =
-    match screen with
-    | Worktrees _ -> Worktrees_msg (Worktrees.decode request)
-    | Worktree _ -> Worktree_msg (Worktree.decode request)
+    match field "type" request.event with
+    | Some (`String "back") -> Back
+    | _ -> (
+        match screen with
+        | Worktrees _ -> Worktrees_msg (Worktrees.decode request)
+        | Worktree _ -> Worktree_msg (Worktree.decode request))
 end
 
 let state = Atomic.make { Home.screen = Home.Worktrees Worktrees.initial }

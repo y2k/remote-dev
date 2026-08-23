@@ -6,4 +6,6 @@
 (test
  (name test_remote_dev)
  (modules test_remote_dev)
- (libraries remote_dev yojson))
+ (libraries remote_dev yojson)
+ (action
+  (run %{test} %{workspace_root}/../../../..)))
