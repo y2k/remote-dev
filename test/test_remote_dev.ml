@@ -1,22 +1,32 @@
+module Todo = struct
+  type event = Submit
+
+  let encode = function Submit -> `Assoc [ ("type", `String "todo") ]
+end
+
+module App = struct
+  type event = Todo of Todo.event
+
+  let encode = function Todo event -> Todo.encode event
+end
+
 let () =
   let event fields value =
     Yojson.Basic.to_string
       (`Assoc [ ("event", `Assoc fields); ("value", value) ])
   in
-  let rec has_back = function
+  let rec has_event event = function
     | `Assoc fields ->
         List.exists
           (fun (name, value) ->
-            (name = "event" && value = `Assoc [ ("type", `String "back") ])
-            || has_back value)
+            (name = "event" && value = event) || has_event event value)
           fields
-    | `List values -> List.exists has_back values
+    | `List values -> List.exists (has_event event) values
     | _ -> false
   in
   assert (
-    Remote_dev.Components.edit
-      ~event:(`Assoc [ ("type", `String "todo") ])
-      "Command"
+    Remote_dev.Components.to_json Todo.encode
+      (Remote_dev.Components.edit ~event:Todo.Submit "Command")
     = `Assoc
         [
           ("@type", `String "input");
@@ -24,9 +34,19 @@ let () =
           ("event", `Assoc [ ("type", `String "todo") ]);
         ]);
   assert (
-    Remote_dev.Components.edit ~text:"draft"
-      ~event:(`Assoc [ ("type", `String "todo") ])
-      "Command"
+    Remote_dev.Components.to_json App.encode
+      (Remote_dev.Components.map
+         (fun event -> App.Todo event)
+         (Remote_dev.Components.button ~event:Todo.Submit "Button"))
+    = `Assoc
+        [
+          ("@type", `String "button");
+          ("label", `String "Button");
+          ("event", `Assoc [ ("type", `String "todo") ]);
+        ]);
+  assert (
+    Remote_dev.Components.to_json Todo.encode
+      (Remote_dev.Components.edit ~text:"draft" ~event:Todo.Submit "Command")
     = `Assoc
         [
           ("@type", `String "input");
@@ -34,6 +54,60 @@ let () =
           ("event", `Assoc [ ("type", `String "todo") ]);
           ("text", `String "draft");
         ]);
+  assert (
+    Remote_dev.Components.to_json Todo.encode
+      (Remote_dev.Components.column
+         [
+           Remote_dev.Components.text "Text";
+           Remote_dev.Components.row
+             [ Remote_dev.Components.button ~event:Todo.Submit "Button" ];
+         ])
+    = `Assoc
+        [
+          ("@type", `String "column");
+          ( "children",
+            `List
+              [
+                `Assoc [ ("@type", `String "text"); ("text", `String "Text") ];
+                `Assoc
+                  [
+                    ("@type", `String "row");
+                    ( "children",
+                      `List
+                        [
+                          `Assoc
+                            [
+                              ("@type", `String "button");
+                              ("label", `String "Button");
+                              ("event", `Assoc [ ("type", `String "todo") ]);
+                            ];
+                        ] );
+                  ];
+              ] );
+        ]);
+  let worktrees_document model =
+    Remote_dev.Home.Home.to_json
+      { screen = Remote_dev.Home.Home.Worktrees model }
+  in
+  let worktree_document model =
+    Remote_dev.Home.Home.to_json
+      { screen = Remote_dev.Home.Home.Worktree model }
+  in
+  assert (
+    has_event
+      (`Assoc
+         [
+           ("type", `String "select_worktree"); ("path", `String "/tmp/clicked");
+         ])
+      (worktrees_document
+         {
+           worktrees = [ { path = "/tmp/clicked"; branch = "main" } ];
+           error = None;
+         }));
+  assert (
+    has_event
+      (`Assoc [ ("type", `String "run_claude") ])
+      (worktree_document { path = "/tmp/clicked"; output = None; error = None }));
   assert (Remote_dev.Home.Cmd.none () = None);
   assert (
     Remote_dev.Home.Cmd.map
@@ -92,17 +166,16 @@ let () =
   let worktree = Yojson.Basic.from_string body in
   assert (
     worktree
-    = Remote_dev.Home.Worktree.view
-        { path = "/tmp/clicked"; output = None; error = None });
-  assert (not (has_back worktree));
+    = worktree_document { path = "/tmp/clicked"; output = None; error = None });
+  assert (not (has_event (`Assoc [ ("type", `String "back") ]) worktree));
   let document =
     Remote_dev.Home.dispatch
       (Remote_dev.Home.Home.Worktree_msg
          (Remote_dev.Home.Worktree.Finished (Ok "answer")))
   in
   assert (
-    Remote_dev.Home.Home.document document
-    = Remote_dev.Home.Worktree.view
+    Remote_dev.Home.Home.to_json document
+    = worktree_document
         { path = "/tmp/clicked"; output = Some "answer"; error = None });
   let status, body, _ =
     Remote_dev.Server.response
@@ -112,7 +185,7 @@ let () =
   assert (status = `OK);
   assert (
     Yojson.Basic.from_string body
-    = Remote_dev.Home.Worktree.view
+    = worktree_document
         {
           path = "/tmp/clicked";
           output = Some "answer";
@@ -126,7 +199,7 @@ let () =
   assert (status = `OK);
   assert (
     Yojson.Basic.from_string body
-    = Remote_dev.Home.Worktree.view
+    = worktree_document
         { path = "/tmp/clicked"; output = Some "answer"; error = None });
 
   let status, _, _ = Remote_dev.Server.response `GET "/" in
@@ -144,7 +217,7 @@ let () =
   assert (status = `OK);
   assert (
     Yojson.Basic.from_string body
-    = Remote_dev.Home.Worktrees.view { worktrees = []; error = None });
+    = worktrees_document { worktrees = []; error = None });
   let next, _ =
     Remote_dev.Home.Home.update
       {
@@ -168,7 +241,7 @@ let () =
   assert (status = `OK);
   assert (
     Yojson.Basic.from_string body
-    = Remote_dev.Home.Worktrees.view
+    = worktrees_document
         { worktrees = []; error = Some "Command requires a selected worktree" });
   Remote_dev.Home.reset ();
   assert (

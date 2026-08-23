@@ -39,6 +39,7 @@ let decode_request body =
 
 module Worktrees = struct
   type model = { worktrees : Runtime.worktree list; error : string option }
+  type action = Select_worktree of string
 
   type msg =
     | Load
@@ -49,22 +50,16 @@ module Worktrees = struct
 
   let initial = { worktrees = []; error = None }
 
-  let view { worktrees; error } : J.t =
+  let encode_action = function
+    | Select_worktree path ->
+        event [ ("type", `String "select_worktree"); ("path", `String path) ]
+
+  let view { worktrees; error } : action Components.t =
     let worktrees =
       worktrees
       |> List.map (fun (w : Runtime.worktree) ->
           column
-            [
-              text w.path;
-              button
-                ~event:
-                  (event
-                     [
-                       ("type", `String "select_worktree");
-                       ("path", `String w.path);
-                     ])
-                w.branch;
-            ])
+            [ text w.path; button ~event:(Select_worktree w.path) w.branch ])
     in
     let content =
       column [ text "Worktrees:"; button "New"; column worktrees ]
@@ -104,6 +99,7 @@ end
 
 module Worktree = struct
   type model = { path : string; output : string option; error : string option }
+  type action = Run_claude
 
   type msg =
     | Clear_error
@@ -114,7 +110,10 @@ module Worktree = struct
 
   let initial path = { path; output = None; error = None }
 
-  let view { path; output; error } : J.t =
+  let encode_action = function
+    | Run_claude -> event [ ("type", `String "run_claude") ]
+
+  let view { path; output; error } : action Components.t =
     let messages =
       match output with Some output -> [ text output ] | None -> []
     in
@@ -126,7 +125,7 @@ module Worktree = struct
           column messages;
           row
             [ button "/igor-pending-reviews"; button "/igor-restart-mr-tests" ];
-          edit ~event:(event [ ("type", `String "run_claude") ]) "Command2";
+          edit ~event:Run_claude "Command2";
         ]
     in
     match error with
@@ -168,11 +167,24 @@ module Home = struct
   type state = { screen : screen }
   type msg = Worktrees_msg of Worktrees.msg | Worktree_msg of Worktree.msg
 
-  let document { screen } =
-    match screen with
-    | Worktrees model -> Worktrees.view model
-    | Worktree model -> Worktree.view model
+  type event =
+    | Worktrees_event of Worktrees.action
+    | Worktree_event of Worktree.action
 
+  let view { screen } =
+    match screen with
+    | Worktrees model ->
+        Components.map
+          (fun event -> Worktrees_event event)
+          (Worktrees.view model)
+    | Worktree model ->
+        Components.map (fun event -> Worktree_event event) (Worktree.view model)
+
+  let encode_event = function
+    | Worktrees_event event -> Worktrees.encode_action event
+    | Worktree_event event -> Worktree.encode_action event
+
+  let to_json state = Components.to_json encode_event (view state)
   let lift_worktrees = Cmd.map (fun message -> Worktrees_msg message)
   let lift_worktree = Cmd.map (fun message -> Worktree_msg message)
 
@@ -223,5 +235,5 @@ let decode body =
 
 let response body =
   match decode body with
-  | Ok message -> Ok (J.pretty_to_string (Home.document (dispatch message)))
+  | Ok message -> Ok (J.pretty_to_string (Home.to_json (dispatch message)))
   | Error message -> Error message
