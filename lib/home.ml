@@ -11,10 +11,6 @@ module Cmd = struct
   let map f cmd () = Option.map f (cmd ())
 end
 
-module Route = struct
-  type t = Worktrees | Worktree of string
-end
-
 type request = { event : (string * J.t) list; value : string option }
 
 let field name fields = List.assoc_opt name fields
@@ -45,6 +41,7 @@ module Worktrees = struct
     | Load
     | Loaded of (Runtime.worktree list, string) result
     | Select of string
+    | Open_worktree of string
     | Error of string
 
   let initial = { worktrees = []; error = None }
@@ -86,12 +83,13 @@ module Worktrees = struct
     | _ -> Error "Unknown event"
 
   let update model = function
-    | Load -> ({ model with error = None }, load, None)
-    | Loaded (Ok worktrees) -> ({ worktrees; error = None }, Cmd.none, None)
-    | Loaded (Error error) -> ({ model with error = Some error }, Cmd.none, None)
+    | Load -> ({ model with error = None }, load)
+    | Loaded (Ok worktrees) -> ({ worktrees; error = None }, Cmd.none)
+    | Loaded (Error error) -> ({ model with error = Some error }, Cmd.none)
     | Select path ->
-        ({ model with error = None }, Cmd.none, Some (Route.Worktree path))
-    | Error error -> ({ model with error = Some error }, Cmd.none, None)
+        ({ model with error = None }, fun () -> Some (Open_worktree path))
+    | Open_worktree _ -> (model, Cmd.none)
+    | Error error -> ({ model with error = Some error }, Cmd.none)
 end
 
 module Worktree = struct
@@ -159,20 +157,17 @@ module Worktree = struct
     | _ -> Error "Unknown event"
 
   let update model = function
-    | Clear_error -> ({ model with error = None }, Cmd.none, None)
+    | Clear_error -> ({ model with error = None }, Cmd.none)
     | Event (Run_claude, Some prompt) ->
-        ({ model with error = None }, run model.path prompt, None)
+        ({ model with error = None }, run model.path prompt)
     | Event (Run_claude, None) ->
-        ( { model with error = Some "Command event requires a value" },
-          Cmd.none,
-          None )
+        ({ model with error = Some "Command event requires a value" }, Cmd.none)
     | Event (Set_prompt prompt, _) ->
-        ({ model with prompt; error = None }, Cmd.none, None)
+        ({ model with prompt; error = None }, Cmd.none)
     | Finished (Ok output) ->
-        ({ model with output = Some output; error = None }, Cmd.none, None)
-    | Finished (Error error) ->
-        ({ model with error = Some error }, Cmd.none, None)
-    | Error error -> ({ model with error = Some error }, Cmd.none, None)
+        ({ model with output = Some output; error = None }, Cmd.none)
+    | Finished (Error error) -> ({ model with error = Some error }, Cmd.none)
+    | Error error -> ({ model with error = Some error }, Cmd.none)
 end
 
 module Home = struct
@@ -205,24 +200,24 @@ module Home = struct
   let lift_worktrees = Cmd.map (fun message -> Worktrees_msg message)
   let lift_worktree = Cmd.map (fun message -> Worktree_msg message)
 
-  let enter = function
-    | Route.Worktrees ->
-        let model, cmd = Worktrees.enter () in
-        ({ screen = Worktrees model }, lift_worktrees cmd)
-    | Route.Worktree path ->
-        let model, cmd = Worktree.enter path in
-        ({ screen = Worktree model }, lift_worktree cmd)
+  let enter_worktrees () =
+    let model, cmd = Worktrees.enter () in
+    ({ screen = Worktrees model }, lift_worktrees cmd)
+
+  let enter_worktree path =
+    let model, cmd = Worktree.enter path in
+    ({ screen = Worktree model }, lift_worktree cmd)
 
   let update_page screen lift update model message =
-    let model, cmd, route = update model message in
-    match route with
-    | Some route -> enter route
-    | None -> ({ screen = screen model }, lift cmd)
+    let model, cmd = update model message in
+    ({ screen = screen model }, lift cmd)
 
   let update { screen } message =
     match (screen, message) with
     | Worktrees _, Back -> ({ screen }, Cmd.none)
-    | Worktree _, Back -> enter Route.Worktrees
+    | Worktree _, Back -> enter_worktrees ()
+    | Worktrees _, Worktrees_msg (Worktrees.Open_worktree path) ->
+        enter_worktree path
     | Worktrees model, Worktrees_msg message ->
         update_page
           (fun model -> Worktrees model)

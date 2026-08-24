@@ -134,11 +134,11 @@ let () =
       (fun () -> Some "child")
       ()
     = Some "home:child");
-  let _, _, route =
+  let _, cmd =
     Remote_dev.Home.Worktrees.update Remote_dev.Home.Worktrees.initial
       (Remote_dev.Home.Worktrees.Select "/tmp/clicked")
   in
-  assert (route = Some (Remote_dev.Home.Route.Worktree "/tmp/clicked"));
+  assert (cmd () = Some (Remote_dev.Home.Worktrees.Open_worktree "/tmp/clicked"));
   let next, cmd =
     Remote_dev.Home.Home.update
       {
@@ -302,7 +302,7 @@ let () =
   assert (
     Yojson.Basic.from_string body
     = worktrees_document { worktrees = []; error = None });
-  let next, _ =
+  let next, cmd =
     Remote_dev.Home.Home.update
       {
         screen =
@@ -311,6 +311,13 @@ let () =
       }
       Remote_dev.Home.Home.Back
   in
+  assert (
+    match cmd () with
+    | Some
+        (Remote_dev.Home.Home.Worktrees_msg (Remote_dev.Home.Worktrees.Loaded _))
+      ->
+        true
+    | _ -> false);
   assert (
     match next.screen with
     | Remote_dev.Home.Home.Worktrees { error = None; _ } -> true
@@ -333,18 +340,17 @@ let () =
     | Remote_dev.Home.Home.Worktrees _ -> true
     | Remote_dev.Home.Home.Worktree _ -> false);
   let model = Remote_dev.Home.Worktree.initial "/tmp/clicked" in
-  let model, _cmd, route =
+  let model, _cmd =
     Remote_dev.Home.Worktree.update model
       (Remote_dev.Home.Worktree.Event
          (Remote_dev.Home.Worktree.Run_claude, Some "prompt"))
   in
-  assert (route = None);
-  let model, _cmd, _ =
+  let model, _cmd =
     Remote_dev.Home.Worktree.update model
       (Remote_dev.Home.Worktree.Finished (Ok "answer"))
   in
   assert (model.output = Some "answer");
-  let model, _, _ =
+  let model, _ =
     Remote_dev.Home.Worktree.update model
       (Remote_dev.Home.Worktree.Finished (Error "failed"))
   in
