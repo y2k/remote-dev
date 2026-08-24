@@ -2,16 +2,20 @@
 
 ## Purpose
 
-Provide a synchronous boundary for sending one prompt to the locally installed Claude CLI in a selected working directory and receiving its textual response.
+Provide a streaming boundary for sending one prompt to the locally installed Claude CLI in a selected working directory and receiving its textual response deltas.
 
 ## Requirements
 
 ### Requirement: Execute a prompt non-interactively
-The system SHALL execute the locally available Claude CLI non-interactively with the supplied prompt and SHALL return the complete standard output without modification after successful process completion.
+The system SHALL execute the locally available Claude CLI non-interactively with the supplied prompt in JSON streaming mode and SHALL deliver each textual response delta to its caller as it becomes available.
+
+#### Scenario: Claude CLI produces text
+- **WHEN** the Claude CLI emits textual response deltas after receiving a prompt
+- **THEN** the system delivers each delta to its caller in emission order before the CLI process exits
 
 #### Scenario: Claude CLI succeeds
 - **WHEN** the Claude CLI exits successfully after receiving a prompt
-- **THEN** the system returns the CLI standard output as text
+- **THEN** the system reports successful completion to its caller after delivering all textual response deltas
 
 ### Requirement: Use the requested working directory
 The system SHALL start the Claude CLI with the supplied directory as its process working directory.

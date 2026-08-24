@@ -146,6 +146,7 @@ module Worktree = struct
   type msg =
     | Clear_error
     | Event of action * string option
+    | Output of string
     | Finished of (string, string) result
     | Error of string
 
@@ -180,11 +181,6 @@ module Worktree = struct
     | None -> content
     | Some error -> column [ text ("Error: " ^ error); content ]
 
-  let run path prompt : msg Cmd.t =
-   fun () ->
-    try Some (Finished (Ok (Runtime.run_claude path prompt)))
-    with exn -> Some (Finished (Error (Printexc.to_string exn)))
-
   let enter path = (initial path, Cmd.none)
 
   let decode { event; value } =
@@ -200,11 +196,18 @@ module Worktree = struct
   let update model = function
     | Clear_error -> ({ model with error = None }, Cmd.none)
     | Event (Run_claude, Some prompt) ->
-        ({ model with error = None }, run model.path prompt)
+        ({ model with prompt; output = None; error = None }, Cmd.none)
     | Event (Run_claude, None) ->
         ({ model with error = Some "Command event requires a value" }, Cmd.none)
     | Event (Set_prompt prompt, _) ->
         ({ model with prompt; error = None }, Cmd.none)
+    | Output output ->
+        ( {
+            model with
+            output = Some (Option.value ~default:"" model.output ^ output);
+            error = None;
+          },
+          Cmd.none )
     | Finished (Ok output) ->
         ({ model with output = Some output; error = None }, Cmd.none)
     | Finished (Error error) -> ({ model with error = Some error }, Cmd.none)
@@ -315,6 +318,29 @@ let rec dispatch message =
 
 let decode body =
   Result.map (Home.decode (Atomic.get state)) (decode_request body)
+
+type claude_stream = { cwd : string; prompt : string }
+
+let start_claude_stream body =
+  match decode body with
+  | Ok
+      (Home.Worktree_msg (Worktree.Event (Worktree.Run_claude, Some prompt)) as
+       message) -> (
+      let next, _ = Home.update (Atomic.get state) message in
+      Atomic.set state next;
+      match next.screen with
+      | Home.Worktree { path; _ } -> Some { cwd = path; prompt }
+      | Home.Worktrees _ | Home.New_worktree _ -> None)
+  | Ok _ | Error _ -> None
+
+let stream_output output =
+  J.to_string
+    (Home.to_json (dispatch (Home.Worktree_msg (Worktree.Output output))))
+
+let stream_error error =
+  J.to_string
+    (Home.to_json
+       (dispatch (Home.Worktree_msg (Worktree.Finished (Error error)))))
 
 let response body =
   match decode body with

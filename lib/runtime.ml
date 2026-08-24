@@ -31,20 +31,44 @@ let load_worktrees (path : string) : worktree list =
   in
   read [] None
 
-let run_claude (cwd : string) (prompt : string) : string =
+let stream_claude (cwd : string) (prompt : string) on_delta : unit =
   (* ponytail: shell wrapper provides child-only cwd and inherited stderr; use fork/pipe only if stderr capture is needed. *)
   let channel =
     Unix.open_process_args_in "/bin/sh"
       [|
         "/bin/sh";
         "-c";
-        "cd \"$1\" && exec claude --print -- \"$2\"";
+        "cd \"$1\" && exec claude --print --output-format stream-json \
+         --verbose --include-partial-messages -- \"$2\"";
         "sh";
         cwd;
         prompt;
       |]
   in
-  let output = In_channel.input_all channel in
-  match Unix.close_process_in channel with
-  | Unix.WEXITED 0 -> output
-  | _ -> failwith "claude failed"
+  let field name fields = List.assoc_opt name fields in
+  let text_delta line =
+    match Yojson.Basic.from_string line with
+    | `Assoc fields -> (
+        match (field "type" fields, field "event" fields) with
+        | Some (`String "stream_event"), Some (`Assoc event) -> (
+            match (field "type" event, field "delta" event) with
+            | Some (`String "content_block_delta"), Some (`Assoc delta) -> (
+                match (field "type" delta, field "text" delta) with
+                | Some (`String "text_delta"), Some (`String text) -> Some text
+                | _ -> None)
+            | _ -> None)
+        | _ -> None)
+    | _ -> None
+  in
+  let rec read () =
+    match input_line channel with
+    | line ->
+        (match text_delta line with Some text -> on_delta text | None -> ());
+        read ()
+    | exception End_of_file -> ()
+  in
+  let result = try Ok (read ()) with exn -> Error exn in
+  match (result, Unix.close_process_in channel) with
+  | Ok (), Unix.WEXITED 0 -> ()
+  | Error exn, _ -> raise exn
+  | Ok (), _ -> failwith "claude failed"

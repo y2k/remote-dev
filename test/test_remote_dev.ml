@@ -444,4 +444,55 @@ let () =
     Remote_dev.Home.Worktree.update model
       (Remote_dev.Home.Worktree.Finished (Error "failed"))
   in
-  assert (model.error = Some "failed")
+  assert (model.error = Some "failed");
+  assert (
+    Httpun.Headers.get Remote_dev.Server.stream_headers "content-type"
+    = Some "application/x-ndjson");
+  assert (
+    Httpun.Headers.get Remote_dev.Server.stream_headers "transfer-encoding"
+    = Some "chunked");
+  assert (
+    not (Httpun.Headers.mem Remote_dev.Server.stream_headers "content-length"));
+  Atomic.set Remote_dev.Home.state
+    {
+      Remote_dev.Home.Home.screen =
+        Remote_dev.Home.Home.Worktree
+          (Remote_dev.Home.Worktree.initial "/tmp/clicked");
+    };
+  assert (
+    match
+      Remote_dev.Home.start_claude_stream
+        (event [ ("type", `String "run_claude") ] (`String "prompt"))
+    with
+    | Some { cwd; prompt } -> cwd = "/tmp/clicked" && prompt = "prompt"
+    | None -> false);
+  let hel = Remote_dev.Home.stream_output "Hel" in
+  assert (not (String.contains hel '\n'));
+  assert (
+    Yojson.Basic.from_string hel
+    = worktree_document
+        {
+          path = "/tmp/clicked";
+          prompt = "prompt";
+          output = Some "Hel";
+          error = None;
+        });
+  let hello = Remote_dev.Home.stream_output "lo" in
+  assert (
+    Yojson.Basic.from_string hello
+    = worktree_document
+        {
+          path = "/tmp/clicked";
+          prompt = "prompt";
+          output = Some "Hello";
+          error = None;
+        });
+  assert (
+    Yojson.Basic.from_string (Remote_dev.Home.stream_error "failed")
+    = worktree_document
+        {
+          path = "/tmp/clicked";
+          prompt = "prompt";
+          output = Some "Hello";
+          error = Some "failed";
+        })

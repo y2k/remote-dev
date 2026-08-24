@@ -17,7 +17,7 @@ Android client
     v
 OCaml / Eio server on :8080
     |-- git worktree list
-    `-- claude --print in the selected worktree
+    `-- claude --print stream-json in the selected worktree
 ```
 
 The server returns a backend-defined UI document. The Android client renders that document and sends events back to the server.
@@ -82,7 +82,9 @@ The server accepts only `POST /` with a JSON event envelope:
 }
 ```
 
-`value` is either a string or `null`. The response to a valid event is a complete JSON UI document. Current event types are `load`, `select_worktree` (with a `path` field), `run_claude`, and `back`.
+`value` is either a string or `null`. Valid events other than a successful `run_claude` return one complete `application/json` UI document. Current event types are `load`, `select_worktree` (with a `path` field), `run_claude`, and `back`.
+
+A successful `run_claude` returns `application/x-ndjson`. Each nonempty line is a compact complete UI document with the accumulated Claude text; the Android client replaces its displayed document for every line until the response closes. If Claude fails after the stream starts, the final document contains the error.
 
 The UI document supports these nodes:
 

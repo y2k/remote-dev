@@ -97,6 +97,24 @@ class BackendUiParserTest {
     }
 
     @Test
+    fun replacesDisplayedDocumentForEachStreamedLine() {
+        val documents =
+            listOf(
+                """{"@type":"text","text":"Hel"}""",
+                """{"@type":"text","text":"Hello"}""",
+            ).map(::parseUiNode)
+        var node by mutableStateOf(documents.first())
+        composeRule.setContent { UiNodeContent(node, {}, { _, _ -> }, false) }
+
+        documents.forEach { document ->
+            composeRule.runOnIdle { node = document }
+            composeRule
+                .onNodeWithText((document as UiNode.Text).text)
+                .assertTextContains(document.text)
+        }
+    }
+
+    @Test
     fun inputSubmitsItsValueOnHardwareEnter() {
         var submitted: Pair<UiEvent, String>? = null
         composeRule.setContent {
@@ -159,6 +177,29 @@ class BackendUiParserTest {
             keyDown(Key.Enter)
             keyUp(Key.Enter)
         }
+        composeRule.onNodeWithTag("input").performKeyInput {
+            keyDown(Key.Enter)
+            keyUp(Key.Enter)
+        }
+
+        composeRule.runOnIdle { assertEquals(1, calls) }
+    }
+
+    @Test
+    fun inputAcceptsAnEventAfterStreamCompletion() {
+        var calls = 0
+        var inProgress by mutableStateOf(true)
+        composeRule.setContent {
+            UiNodeContent(
+                UiNode.Input("Input", UiEvent("{\"type\":\"input\"}")),
+                {},
+                { _, _ -> calls++ },
+                inProgress,
+            )
+        }
+
+        composeRule.runOnIdle { inProgress = false }
+        composeRule.onNodeWithTag("input").performClick()
         composeRule.onNodeWithTag("input").performKeyInput {
             keyDown(Key.Enter)
             keyUp(Key.Enter)

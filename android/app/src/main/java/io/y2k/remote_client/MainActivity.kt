@@ -28,18 +28,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
-import io.ktor.client.plugins.HttpTimeout
-import io.ktor.client.request.post
+import io.ktor.client.request.preparePost
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
+import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.y2k.remote_client.ui.theme.MyApplicationTheme
+import io.ktor.utils.io.readLine
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -131,12 +134,7 @@ fun eventRequest(event: UiEvent, value: String?): String =
     JSONObject().put("event", JSONObject(event.json)).put("value", value ?: JSONObject.NULL).toString()
 
 class MainActivity : ComponentActivity() {
-    private val client =
-        HttpClient(Android) {
-            install(HttpTimeout) {
-                requestTimeoutMillis = 15_000
-            }
-        }
+    private val client = HttpClient(Android)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -192,17 +190,24 @@ private fun App(client: HttpClient) {
             val previous = state
             if (previous !is ScreenState.Content) state = ScreenState.Loading
             try {
-                state =
-                    ScreenState.Content(
-                        parseUiNode(
-                            client
-                                .post(BuildConfig.BACKEND_URL) {
-                                    contentType(io.ktor.http.ContentType.Application.Json)
-                                    setBody(eventRequest(event, value))
-                                }
-                                .bodyAsText()
-                        )
-                    )
+                client
+                    .preparePost(BuildConfig.BACKEND_URL) {
+                        contentType(io.ktor.http.ContentType.Application.Json)
+                        setBody(eventRequest(event, value))
+                    }.execute { response ->
+                    if (response.headers[HttpHeaders.ContentType]?.startsWith("application/x-ndjson") == true) {
+                        val body = response.bodyAsChannel()
+                        while (true) {
+                            val line = body.readLine() ?: break
+                            if (line.isNotEmpty()) {
+                                state = ScreenState.Content(parseUiNode(line))
+                                withFrameNanos {}
+                            }
+                        }
+                    } else {
+                        state = ScreenState.Content(parseUiNode(response.bodyAsText()))
+                    }
+                }
             } catch (error: Exception) {
                 if (previous is ScreenState.Content) {
                     state = previous
