@@ -93,6 +93,14 @@ let () =
     Remote_dev.Home.Home.to_json
       { screen = Remote_dev.Home.Home.Worktree model }
   in
+  let creation_document model =
+    Remote_dev.Home.Home.to_json
+      {
+        screen =
+          Remote_dev.Home.Home.New_worktree
+            (model, Remote_dev.Home.New_worktree.initial);
+      }
+  in
   assert (
     has_event
       (`Assoc
@@ -100,6 +108,22 @@ let () =
            ("type", `String "select_worktree"); ("path", `String "/tmp/clicked");
          ])
       (worktrees_document
+         {
+           worktrees = [ { path = "/tmp/clicked"; branch = "main" } ];
+           error = None;
+         }));
+  assert (
+    has_event
+      (`Assoc [ ("type", `String "new_worktree") ])
+      (worktrees_document
+         {
+           worktrees = [ { path = "/tmp/clicked"; branch = "main" } ];
+           error = None;
+         }));
+  assert (
+    has_event
+      (`Assoc [ ("type", `String "create_worktree") ])
+      (creation_document
          {
            worktrees = [ { path = "/tmp/clicked"; branch = "main" } ];
            error = None;
@@ -152,7 +176,8 @@ let () =
   assert (
     match next.screen with
     | Remote_dev.Home.Home.Worktrees { worktrees = []; error = None } -> true
-    | Remote_dev.Home.Home.Worktrees _ | Remote_dev.Home.Home.Worktree _ ->
+    | Remote_dev.Home.Home.Worktrees _ | Remote_dev.Home.Home.New_worktree _
+    | Remote_dev.Home.Home.Worktree _ ->
         false);
   let next, cmd =
     Remote_dev.Home.Home.update
@@ -166,8 +191,70 @@ let () =
   assert (
     match next.screen with
     | Remote_dev.Home.Home.Worktrees { worktrees = []; error = None } -> true
-    | Remote_dev.Home.Home.Worktrees _ | Remote_dev.Home.Home.Worktree _ ->
+    | Remote_dev.Home.Home.Worktrees _ | Remote_dev.Home.Home.New_worktree _
+    | Remote_dev.Home.Home.Worktree _ ->
         false);
+  let listed_worktrees =
+    {
+      Remote_dev.Home.Worktrees.worktrees =
+        [ { path = "/tmp/clicked"; branch = "main" } ];
+      error = None;
+    }
+  in
+  let creation, cmd =
+    Remote_dev.Home.Home.update
+      { screen = Remote_dev.Home.Home.Worktrees listed_worktrees }
+      (Remote_dev.Home.Home.Worktrees_msg
+         Remote_dev.Home.Worktrees.Open_creation)
+  in
+  assert (cmd () = None);
+  assert (
+    Remote_dev.Home.Home.to_json creation = creation_document listed_worktrees);
+  let creation, cmd =
+    Remote_dev.Home.Home.update creation
+      (Remote_dev.Home.Home.New_worktree_msg
+         (Remote_dev.Home.New_worktree.Create "feature/new-worktree"))
+  in
+  assert (cmd () = None);
+  assert (
+    Remote_dev.Home.Home.to_json creation = creation_document listed_worktrees);
+  let listed, cmd =
+    Remote_dev.Home.Home.update creation Remote_dev.Home.Home.Back
+  in
+  assert (cmd () = None);
+  assert (
+    Remote_dev.Home.Home.to_json listed = worktrees_document listed_worktrees);
+  Remote_dev.Home.reset ();
+  let status, body, _ =
+    Remote_dev.Server.response
+      ~body:(event [ ("type", `String "new_worktree") ] `Null)
+      `POST "/"
+  in
+  assert (status = `OK);
+  assert (
+    Yojson.Basic.from_string body
+    = creation_document Remote_dev.Home.Worktrees.initial);
+  let status, body, _ =
+    Remote_dev.Server.response
+      ~body:
+        (event
+           [ ("type", `String "create_worktree") ]
+           (`String "feature/new-worktree"))
+      `POST "/"
+  in
+  assert (status = `OK);
+  assert (
+    Yojson.Basic.from_string body
+    = creation_document Remote_dev.Home.Worktrees.initial);
+  let status, body, _ =
+    Remote_dev.Server.response
+      ~body:(event [ ("type", `String "back") ] `Null)
+      `POST "/"
+  in
+  assert (status = `OK);
+  assert (
+    Yojson.Basic.from_string body
+    = worktrees_document Remote_dev.Home.Worktrees.initial);
   Remote_dev.Home.reset ();
   let status, body, content_type =
     Remote_dev.Server.response
@@ -284,7 +371,8 @@ let () =
     match (Atomic.get Remote_dev.Home.state).screen with
     | Remote_dev.Home.Home.Worktrees model ->
         Yojson.Basic.from_string body = worktrees_document model
-    | Remote_dev.Home.Home.Worktree _ -> false);
+    | Remote_dev.Home.Home.New_worktree _ | Remote_dev.Home.Home.Worktree _ ->
+        false);
 
   let status, _, _ = Remote_dev.Server.response `GET "/" in
   assert (status = `Not_found);
@@ -321,7 +409,8 @@ let () =
   assert (
     match next.screen with
     | Remote_dev.Home.Home.Worktrees { error = None; _ } -> true
-    | Remote_dev.Home.Home.Worktrees _ | Remote_dev.Home.Home.Worktree _ ->
+    | Remote_dev.Home.Home.Worktrees _ | Remote_dev.Home.Home.New_worktree _
+    | Remote_dev.Home.Home.Worktree _ ->
         false);
   Remote_dev.Home.reset ();
   let status, body, _ =
@@ -338,7 +427,8 @@ let () =
   assert (
     match (Atomic.get Remote_dev.Home.state).screen with
     | Remote_dev.Home.Home.Worktrees _ -> true
-    | Remote_dev.Home.Home.Worktree _ -> false);
+    | Remote_dev.Home.Home.New_worktree _ | Remote_dev.Home.Home.Worktree _ ->
+        false);
   let model = Remote_dev.Home.Worktree.initial "/tmp/clicked" in
   let model, _cmd =
     Remote_dev.Home.Worktree.update model

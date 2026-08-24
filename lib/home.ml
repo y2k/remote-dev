@@ -35,13 +35,14 @@ let decode_request body =
 
 module Worktrees = struct
   type model = { worktrees : Runtime.worktree list; error : string option }
-  type action = Select_worktree of string
+  type action = Select_worktree of string | New_worktree
 
   type msg =
     | Load
     | Loaded of (Runtime.worktree list, string) result
     | Select of string
     | Open_worktree of string
+    | Open_creation
     | Error of string
 
   let initial = { worktrees = []; error = None }
@@ -49,6 +50,7 @@ module Worktrees = struct
   let encode_action = function
     | Select_worktree path ->
         event [ ("type", `String "select_worktree"); ("path", `String path) ]
+    | New_worktree -> event [ ("type", `String "new_worktree") ]
 
   let view { worktrees; error } : action Components.t =
     let worktrees =
@@ -58,7 +60,10 @@ module Worktrees = struct
             [ text w.path; button ~event:(Select_worktree w.path) w.branch ])
     in
     let content =
-      column [ text "Worktrees:"; button "New"; column worktrees ]
+      column
+        [
+          text "Worktrees:"; button ~event:New_worktree "New"; column worktrees;
+        ]
     in
     match error with
     | None -> content
@@ -78,6 +83,7 @@ module Worktrees = struct
         match field "path" event with
         | Some (`String path) -> Select path
         | _ -> Error "Invalid worktree event")
+    | Some (`String "new_worktree") -> Open_creation
     | Some (`String "run_claude") ->
         Error "Command requires a selected worktree"
     | _ -> Error "Unknown event"
@@ -89,7 +95,42 @@ module Worktrees = struct
     | Select path ->
         ({ model with error = None }, fun () -> Some (Open_worktree path))
     | Open_worktree _ -> (model, Cmd.none)
+    | Open_creation -> (model, Cmd.none)
     | Error error -> ({ model with error = Some error }, Cmd.none)
+end
+
+module New_worktree = struct
+  type model = { error : string option }
+  type action = Create_worktree
+  type msg = Clear_error | Create of string | Error of string
+
+  let initial = { error = None }
+
+  let encode_action = function
+    | Create_worktree -> event [ ("type", `String "create_worktree") ]
+
+  let view { error } : action Components.t =
+    let content =
+      column [ text "New worktree"; edit ~event:Create_worktree "Branch" ]
+    in
+    match error with
+    | None -> content
+    | Some error -> column [ text ("Error: " ^ error); content ]
+
+  let enter () = (initial, Cmd.none)
+
+  let decode { event; value } =
+    match field "type" event with
+    | Some (`String "load") -> Clear_error
+    | Some (`String "create_worktree") -> (
+        match value with
+        | Some branch -> Create branch
+        | None -> Error "Create worktree event requires a value")
+    | _ -> Error "Unknown event"
+
+  let update _ = function
+    | Clear_error | Create _ -> ({ error = None }, Cmd.none)
+    | Error error -> ({ error = Some error }, Cmd.none)
 end
 
 module Worktree = struct
@@ -171,16 +212,22 @@ module Worktree = struct
 end
 
 module Home = struct
-  type screen = Worktrees of Worktrees.model | Worktree of Worktree.model
+  type screen =
+    | Worktrees of Worktrees.model
+    | New_worktree of Worktrees.model * New_worktree.model
+    | Worktree of Worktree.model
+
   type state = { screen : screen }
 
   type msg =
     | Back
     | Worktrees_msg of Worktrees.msg
+    | New_worktree_msg of New_worktree.msg
     | Worktree_msg of Worktree.msg
 
   type event =
     | Worktrees_event of Worktrees.action
+    | New_worktree_event of New_worktree.action
     | Worktree_event of Worktree.action
 
   let view { screen } =
@@ -189,15 +236,21 @@ module Home = struct
         Components.map
           (fun event -> Worktrees_event event)
           (Worktrees.view model)
+    | New_worktree (_, model) ->
+        Components.map
+          (fun event -> New_worktree_event event)
+          (New_worktree.view model)
     | Worktree model ->
         Components.map (fun event -> Worktree_event event) (Worktree.view model)
 
   let encode_event = function
     | Worktrees_event event -> Worktrees.encode_action event
+    | New_worktree_event event -> New_worktree.encode_action event
     | Worktree_event event -> Worktree.encode_action event
 
   let to_json state = Components.to_json encode_event (view state)
   let lift_worktrees = Cmd.map (fun message -> Worktrees_msg message)
+  let lift_new_worktree = Cmd.map (fun message -> New_worktree_msg message)
   let lift_worktree = Cmd.map (fun message -> Worktree_msg message)
 
   let enter_worktrees () =
@@ -208,6 +261,10 @@ module Home = struct
     let model, cmd = Worktree.enter path in
     ({ screen = Worktree model }, lift_worktree cmd)
 
+  let enter_new_worktree worktrees =
+    let model, cmd = New_worktree.enter () in
+    ({ screen = New_worktree (worktrees, model) }, lift_new_worktree cmd)
+
   let update_page screen lift update model message =
     let model, cmd = update model message in
     ({ screen = screen model }, lift cmd)
@@ -215,9 +272,17 @@ module Home = struct
   let update { screen } message =
     match (screen, message) with
     | Worktrees _, Back -> ({ screen }, Cmd.none)
+    | New_worktree (worktrees, _), Back ->
+        ({ screen = Worktrees worktrees }, Cmd.none)
     | Worktree _, Back -> enter_worktrees ()
     | Worktrees _, Worktrees_msg (Worktrees.Open_worktree path) ->
         enter_worktree path
+    | Worktrees model, Worktrees_msg Worktrees.Open_creation ->
+        enter_new_worktree model
+    | New_worktree (worktrees, model), New_worktree_msg message ->
+        update_page
+          (fun model -> New_worktree (worktrees, model))
+          lift_new_worktree New_worktree.update model message
     | Worktrees model, Worktrees_msg message ->
         update_page
           (fun model -> Worktrees model)
@@ -234,6 +299,7 @@ module Home = struct
     | _ -> (
         match screen with
         | Worktrees _ -> Worktrees_msg (Worktrees.decode request)
+        | New_worktree _ -> New_worktree_msg (New_worktree.decode request)
         | Worktree _ -> Worktree_msg (Worktree.decode request))
 end
 
