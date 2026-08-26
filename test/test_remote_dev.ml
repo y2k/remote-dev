@@ -1,3 +1,5 @@
+module J = Yojson.Safe
+
 module Todo = struct
   type event = Submit
 
@@ -11,9 +13,18 @@ module App = struct
 end
 
 let () =
-  let event fields value =
-    Yojson.Basic.to_string
-      (`Assoc [ ("event", `Assoc fields); ("value", value) ])
+  let request_body message =
+    J.to_string
+      (`Assoc
+         [
+           ("event", Remote_dev.Home.Home.msg_to_yojson message);
+           ("value", `Null);
+         ])
+  in
+  let stream_documents body =
+    body |> String.split_on_char '\n'
+    |> List.filter (fun line -> line <> "")
+    |> List.map J.from_string
   in
   let rec has_event event = function
     | `Assoc fields ->
@@ -101,12 +112,110 @@ let () =
             (model, Remote_dev.Home.New_worktree.initial);
       }
   in
+  let home_event = Remote_dev.Home.Home.msg_to_yojson in
+  let string_to_yojson value = `String value in
+  let string_of_yojson = function
+    | `String value -> Ok value
+    | _ -> Error "string"
+  in
+  assert (
+    Remote_dev.Home.result_to_yojson string_to_yojson string_to_yojson
+      (Ok "value")
+    = `List [ `String "Ok"; `String "value" ]);
+  assert (
+    Remote_dev.Home.result_to_yojson string_to_yojson string_to_yojson
+      (Error "failed")
+    = `List [ `String "Error"; `String "failed" ]);
+  assert (
+    Remote_dev.Home.result_of_yojson string_of_yojson string_of_yojson
+      (`List [ `String "Ok"; `String "value" ])
+    = Ok (Ok "value"));
+  assert (
+    Remote_dev.Home.result_of_yojson string_of_yojson string_of_yojson
+      (`List [ `String "Error"; `String "failed" ])
+    = Ok (Error "failed"));
+  let invalid_result json =
+    match
+      Remote_dev.Home.result_of_yojson string_of_yojson string_of_yojson json
+    with
+    | Error _ -> true
+    | Ok _ -> false
+  in
+  assert (invalid_result (`List [ `String "Other"; `String "value" ]));
+  assert (invalid_result (`List [ `String "Ok" ]));
+  assert (invalid_result (`List [ `String "Ok"; `Int 1 ]));
+  let round_trip message =
+    assert (
+      Remote_dev.Home.Home.msg_of_yojson
+        (Remote_dev.Home.Home.msg_to_yojson message)
+      = Ok message)
+  in
+  round_trip
+    (Remote_dev.Home.Home.Worktrees_msg
+       (Remote_dev.Home.Worktrees.Loaded (Ok [])));
+  round_trip
+    (Remote_dev.Home.Home.Worktrees_msg
+       (Remote_dev.Home.Worktrees.Loaded (Error "failed")));
+  round_trip
+    (Remote_dev.Home.Home.Worktree_msg
+       (Remote_dev.Home.Worktree.Finished (Ok "answer")));
+  round_trip
+    (Remote_dev.Home.Home.Worktree_msg
+       (Remote_dev.Home.Worktree.Finished (Error "failed")));
+  assert (
+    Remote_dev.Home.decode (request_body Remote_dev.Home.Home.Back)
+    = Ok Remote_dev.Home.Home.Back);
+  assert (
+    Remote_dev.Home.decode
+      (J.to_string
+         (`Assoc
+            [
+              ( "event",
+                Remote_dev.Home.Home.msg_to_yojson
+                  (Remote_dev.Home.Home.Worktree_msg
+                     (Remote_dev.Home.Worktree.Run_claude "__VALUE__")) );
+              ("value", `String "prompt");
+            ]))
+    = Ok
+        (Remote_dev.Home.Home.Worktree_msg
+           (Remote_dev.Home.Worktree.Run_claude "prompt")));
+  let initial, cmd = Remote_dev.Home.Home.init () in
+  assert (
+    match initial.screen with
+    | Remote_dev.Home.Home.Worktrees { worktrees = []; error = None } -> true
+    | Remote_dev.Home.Home.Worktrees _ | Remote_dev.Home.Home.New_worktree _
+    | Remote_dev.Home.Home.Worktree _ ->
+        false);
+  assert (
+    match Remote_dev.Home.Cmd.run cmd with
+    | Some
+        (Remote_dev.Home.Home.Worktrees_msg (Remote_dev.Home.Worktrees.Loaded _))
+      ->
+        true
+    | _ -> false);
+  Remote_dev.Home.reset ();
+  let initial = Atomic.get Remote_dev.Home.state in
+  let documents =
+    Remote_dev.Server.stream_body initial
+      (Remote_dev.Home.Cmd.Run
+         (fun () ->
+           Some
+             (Remote_dev.Home.Home.Worktrees_msg
+                (Remote_dev.Home.Worktrees.Loaded (Error "failed")))))
+    |> stream_documents
+  in
+  assert (List.length documents = 2);
+  assert (
+    match (Atomic.get Remote_dev.Home.state).screen with
+    | Remote_dev.Home.Home.Worktrees { error = Some "failed"; _ } -> true
+    | Remote_dev.Home.Home.Worktrees _ | Remote_dev.Home.Home.New_worktree _
+    | Remote_dev.Home.Home.Worktree _ ->
+        false);
   assert (
     has_event
-      (`Assoc
-         [
-           ("type", `String "select_worktree"); ("path", `String "/tmp/clicked");
-         ])
+      (home_event
+         (Remote_dev.Home.Home.Worktrees_msg
+            (Remote_dev.Home.Worktrees.Select "/tmp/clicked")))
       (worktrees_document
          {
            worktrees = [ { path = "/tmp/clicked"; branch = "main" } ];
@@ -114,7 +223,9 @@ let () =
          }));
   assert (
     has_event
-      (`Assoc [ ("type", `String "new_worktree") ])
+      (home_event
+         (Remote_dev.Home.Home.Worktrees_msg
+            Remote_dev.Home.Worktrees.Open_creation))
       (worktrees_document
          {
            worktrees = [ { path = "/tmp/clicked"; branch = "main" } ];
@@ -122,7 +233,9 @@ let () =
          }));
   assert (
     has_event
-      (`Assoc [ ("type", `String "create_worktree") ])
+      (home_event
+         (Remote_dev.Home.Home.New_worktree_msg
+            (Remote_dev.Home.New_worktree.Create "__VALUE__")))
       (creation_document
          {
            worktrees = [ { path = "/tmp/clicked"; branch = "main" } ];
@@ -130,39 +243,32 @@ let () =
          }));
   assert (
     has_event
-      (`Assoc [ ("type", `String "run_claude") ])
+      (home_event
+         (Remote_dev.Home.Home.Worktree_msg
+            (Remote_dev.Home.Worktree.Run_claude "__VALUE__")))
       (worktree_document
          { path = "/tmp/clicked"; prompt = ""; output = None; error = None }));
   assert (
     has_event
-      (`Assoc
-         [
-           ("type", `String "set_prompt");
-           ("prompt", `String "/igor-pending-reviews");
-         ])
+      (home_event
+         (Remote_dev.Home.Home.Worktree_msg
+            (Remote_dev.Home.Worktree.Set_prompt "/igor-pending-reviews")))
       (worktree_document
          { path = "/tmp/clicked"; prompt = ""; output = None; error = None }));
   assert (
     has_event
-      (`Assoc
-         [
-           ("type", `String "set_prompt");
-           ("prompt", `String "/igor-restart-mr-tests");
-         ])
+      (home_event
+         (Remote_dev.Home.Home.Worktree_msg
+            (Remote_dev.Home.Worktree.Set_prompt "/igor-restart-mr-tests")))
       (worktree_document
          { path = "/tmp/clicked"; prompt = ""; output = None; error = None }));
-  assert (Remote_dev.Home.Cmd.none () = None);
+  assert (Remote_dev.Home.Cmd.run Remote_dev.Home.Cmd.none = None);
   assert (
-    Remote_dev.Home.Cmd.map
-      (fun message -> "home:" ^ message)
-      (fun () -> Some "child")
-      ()
+    Remote_dev.Home.Cmd.run
+      (Remote_dev.Home.Cmd.map
+         (fun message -> "home:" ^ message)
+         (Remote_dev.Home.Cmd.Run (fun () -> Some "child")))
     = Some "home:child");
-  let _, cmd =
-    Remote_dev.Home.Worktrees.update Remote_dev.Home.Worktrees.initial
-      (Remote_dev.Home.Worktrees.Select "/tmp/clicked")
-  in
-  assert (cmd () = Some (Remote_dev.Home.Worktrees.Open_worktree "/tmp/clicked"));
   let next, cmd =
     Remote_dev.Home.Home.update
       {
@@ -172,7 +278,7 @@ let () =
       (Remote_dev.Home.Home.Worktrees_msg
          (Remote_dev.Home.Worktrees.Loaded (Ok [])))
   in
-  assert (cmd () = None);
+  assert (Remote_dev.Home.Cmd.run cmd = None);
   assert (
     match next.screen with
     | Remote_dev.Home.Home.Worktrees { worktrees = []; error = None } -> true
@@ -187,7 +293,7 @@ let () =
       }
       Remote_dev.Home.Home.Back
   in
-  assert (cmd () = None);
+  assert (Remote_dev.Home.Cmd.run cmd = None);
   assert (
     match next.screen with
     | Remote_dev.Home.Home.Worktrees { worktrees = []; error = None } -> true
@@ -207,7 +313,7 @@ let () =
       (Remote_dev.Home.Home.Worktrees_msg
          Remote_dev.Home.Worktrees.Open_creation)
   in
-  assert (cmd () = None);
+  assert (Remote_dev.Home.Cmd.run cmd = None);
   assert (
     Remote_dev.Home.Home.to_json creation = creation_document listed_worktrees);
   let creation, cmd =
@@ -215,61 +321,58 @@ let () =
       (Remote_dev.Home.Home.New_worktree_msg
          (Remote_dev.Home.New_worktree.Create "feature/new-worktree"))
   in
-  assert (cmd () = None);
+  assert (Remote_dev.Home.Cmd.run cmd = None);
   assert (
     Remote_dev.Home.Home.to_json creation = creation_document listed_worktrees);
   let listed, cmd =
     Remote_dev.Home.Home.update creation Remote_dev.Home.Home.Back
   in
-  assert (cmd () = None);
+  assert (Remote_dev.Home.Cmd.run cmd = None);
   assert (
     Remote_dev.Home.Home.to_json listed = worktrees_document listed_worktrees);
   Remote_dev.Home.reset ();
   let status, body, _ =
     Remote_dev.Server.response
-      ~body:(event [ ("type", `String "new_worktree") ] `Null)
+      ~body:
+        (request_body
+           (Remote_dev.Home.Home.Worktrees_msg
+              Remote_dev.Home.Worktrees.Open_creation))
       `POST "/"
   in
   assert (status = `OK);
   assert (
-    Yojson.Basic.from_string body
-    = creation_document Remote_dev.Home.Worktrees.initial);
+    J.from_string body = creation_document Remote_dev.Home.Worktrees.initial);
   let status, body, _ =
     Remote_dev.Server.response
       ~body:
-        (event
-           [ ("type", `String "create_worktree") ]
-           (`String "feature/new-worktree"))
+        (request_body
+           (Remote_dev.Home.Home.New_worktree_msg
+              (Remote_dev.Home.New_worktree.Create "feature/new-worktree")))
       `POST "/"
   in
   assert (status = `OK);
   assert (
-    Yojson.Basic.from_string body
-    = creation_document Remote_dev.Home.Worktrees.initial);
+    J.from_string body = creation_document Remote_dev.Home.Worktrees.initial);
   let status, body, _ =
     Remote_dev.Server.response
-      ~body:(event [ ("type", `String "back") ] `Null)
+      ~body:(request_body Remote_dev.Home.Home.Back)
       `POST "/"
   in
   assert (status = `OK);
   assert (
-    Yojson.Basic.from_string body
-    = worktrees_document Remote_dev.Home.Worktrees.initial);
+    J.from_string body = worktrees_document Remote_dev.Home.Worktrees.initial);
   Remote_dev.Home.reset ();
   let status, body, content_type =
     Remote_dev.Server.response
       ~body:
-        (event
-           [
-             ("type", `String "select_worktree");
-             ("path", `String "/tmp/clicked");
-           ]
-           `Null)
+        (request_body
+           (Remote_dev.Home.Home.Worktrees_msg
+              (Remote_dev.Home.Worktrees.Select "/tmp/clicked")))
       `POST "/"
   in
   assert (status = `OK);
   assert (content_type = "application/json");
-  let worktree = Yojson.Basic.from_string body in
+  let worktree = J.from_string body in
   assert (
     worktree
     = worktree_document
@@ -278,17 +381,14 @@ let () =
   let status, body, _ =
     Remote_dev.Server.response
       ~body:
-        (event
-           [
-             ("type", `String "set_prompt");
-             ("prompt", `String "/igor-pending-reviews");
-           ]
-           `Null)
+        (request_body
+           (Remote_dev.Home.Home.Worktree_msg
+              (Remote_dev.Home.Worktree.Set_prompt "/igor-pending-reviews")))
       `POST "/"
   in
   assert (status = `OK);
   assert (
-    Yojson.Basic.from_string body
+    J.from_string body
     = worktree_document
         {
           path = "/tmp/clicked";
@@ -299,17 +399,14 @@ let () =
   let status, body, _ =
     Remote_dev.Server.response
       ~body:
-        (event
-           [
-             ("type", `String "set_prompt");
-             ("prompt", `String "/igor-restart-mr-tests");
-           ]
-           `Null)
+        (request_body
+           (Remote_dev.Home.Home.Worktree_msg
+              (Remote_dev.Home.Worktree.Set_prompt "/igor-restart-mr-tests")))
       `POST "/"
   in
   assert (status = `OK);
   assert (
-    Yojson.Basic.from_string body
+    J.from_string body
     = worktree_document
         {
           path = "/tmp/clicked";
@@ -333,63 +430,90 @@ let () =
         });
   let status, body, _ =
     Remote_dev.Server.response
-      ~body:(event [ ("type", `String "run_claude") ] `Null)
+      ~body:
+        (request_body
+           (Remote_dev.Home.Home.Worktree_msg
+              (Remote_dev.Home.Worktree.Run_claude "new prompt")))
       `POST "/"
   in
   assert (status = `OK);
   assert (
-    Yojson.Basic.from_string body
+    J.from_string body
     = worktree_document
         {
           path = "/tmp/clicked";
-          prompt = "/igor-restart-mr-tests";
-          output = Some "answer";
-          error = Some "Command event requires a value";
-        });
-  let status, body, _ =
-    Remote_dev.Server.response
-      ~body:(event [ ("type", `String "load") ] `Null)
-      `POST "/"
-  in
-  assert (status = `OK);
-  assert (
-    Yojson.Basic.from_string body
-    = worktree_document
-        {
-          path = "/tmp/clicked";
-          prompt = "/igor-restart-mr-tests";
-          output = Some "answer";
+          prompt = "new prompt";
+          output = None;
           error = None;
         });
-  let status, body, _ =
+  let status, body, content_type =
     Remote_dev.Server.response
-      ~body:(event [ ("type", `String "back") ] `Null)
+      ~body:(request_body Remote_dev.Home.Home.Back)
       `POST "/"
   in
   assert (status = `OK);
+  assert (content_type = "application/x-ndjson");
   assert (
     match (Atomic.get Remote_dev.Home.state).screen with
     | Remote_dev.Home.Home.Worktrees model ->
-        Yojson.Basic.from_string body = worktrees_document model
+        List.hd (List.rev (stream_documents body)) = worktrees_document model
     | Remote_dev.Home.Home.New_worktree _ | Remote_dev.Home.Home.Worktree _ ->
         false);
 
-  let status, _, _ = Remote_dev.Server.response `GET "/" in
-  assert (status = `Not_found);
+  Remote_dev.Home.reset ();
+  Remote_dev.Server.initialize ();
+  let status, body, content_type = Remote_dev.Server.response `GET "/" in
+  assert (status = `OK);
+  assert (content_type = "application/json");
+  assert (
+    match (Atomic.get Remote_dev.Home.state).screen with
+    | Remote_dev.Home.Home.Worktrees model ->
+        J.from_string body = worktrees_document model
+    | Remote_dev.Home.Home.New_worktree _ | Remote_dev.Home.Home.Worktree _ ->
+        false);
+  let status, body, content_type = Remote_dev.Server.response `GET "/" in
+  assert (status = `OK);
+  assert (content_type = "application/json");
+  assert (
+    match (Atomic.get Remote_dev.Home.state).screen with
+    | Remote_dev.Home.Home.Worktrees model ->
+        J.from_string body = worktrees_document model
+    | Remote_dev.Home.Home.New_worktree _ | Remote_dev.Home.Home.Worktree _ ->
+        false);
+  let previous = J.from_string body in
+  let status, body, content_type =
+    Remote_dev.Server.response
+      ~body:
+        (request_body
+           (Remote_dev.Home.Home.Worktrees_msg Remote_dev.Home.Worktrees.Load))
+      `POST "/"
+  in
+  assert (status = `OK);
+  assert (content_type = "application/x-ndjson");
+  let documents = stream_documents body in
+  assert (List.length documents = 2);
+  assert (List.hd documents = previous);
+  assert (
+    match (Atomic.get Remote_dev.Home.state).screen with
+    | Remote_dev.Home.Home.Worktrees model ->
+        List.hd (List.rev documents) = worktrees_document model
+    | Remote_dev.Home.Home.New_worktree _ | Remote_dev.Home.Home.Worktree _ ->
+        false);
   let status, _, _ = Remote_dev.Server.response `POST "/missing" in
+  assert (status = `Not_found);
+  let status, _, _ = Remote_dev.Server.response `GET "/missing" in
   assert (status = `Not_found);
   let status, _, _ = Remote_dev.Server.response ~body:"{}" `POST "/" in
   assert (status = `Bad_request);
   Remote_dev.Home.reset ();
   let status, body, _ =
     Remote_dev.Server.response
-      ~body:(event [ ("type", `String "back") ] `Null)
+      ~body:(request_body Remote_dev.Home.Home.Back)
       `POST "/"
   in
   assert (status = `OK);
   assert (
-    Yojson.Basic.from_string body
-    = worktrees_document { worktrees = []; error = None });
+    J.from_string body = worktrees_document { worktrees = []; error = None });
   let next, cmd =
     Remote_dev.Home.Home.update
       {
@@ -400,7 +524,7 @@ let () =
       Remote_dev.Home.Home.Back
   in
   assert (
-    match cmd () with
+    match Remote_dev.Home.Cmd.run cmd with
     | Some
         (Remote_dev.Home.Home.Worktrees_msg (Remote_dev.Home.Worktrees.Loaded _))
       ->
@@ -415,14 +539,15 @@ let () =
   Remote_dev.Home.reset ();
   let status, body, _ =
     Remote_dev.Server.response
-      ~body:(event [ ("type", `String "run_claude") ] `Null)
+      ~body:
+        (request_body
+           (Remote_dev.Home.Home.Worktree_msg
+              (Remote_dev.Home.Worktree.Run_claude "prompt")))
       `POST "/"
   in
   assert (status = `OK);
   assert (
-    Yojson.Basic.from_string body
-    = worktrees_document
-        { worktrees = []; error = Some "Command requires a selected worktree" });
+    J.from_string body = worktrees_document { worktrees = []; error = None });
   Remote_dev.Home.reset ();
   assert (
     match (Atomic.get Remote_dev.Home.state).screen with
@@ -432,8 +557,7 @@ let () =
   let model = Remote_dev.Home.Worktree.initial "/tmp/clicked" in
   let model, _cmd =
     Remote_dev.Home.Worktree.update model
-      (Remote_dev.Home.Worktree.Event
-         (Remote_dev.Home.Worktree.Run_claude, Some "prompt"))
+      (Remote_dev.Home.Worktree.Run_claude "prompt")
   in
   let model, _cmd =
     Remote_dev.Home.Worktree.update model
@@ -462,14 +586,16 @@ let () =
   assert (
     match
       Remote_dev.Home.start_claude_stream
-        (event [ ("type", `String "run_claude") ] (`String "prompt"))
+        (request_body
+           (Remote_dev.Home.Home.Worktree_msg
+              (Remote_dev.Home.Worktree.Run_claude "prompt")))
     with
     | Some { cwd; prompt } -> cwd = "/tmp/clicked" && prompt = "prompt"
     | None -> false);
   let hel = Remote_dev.Home.stream_output "Hel" in
   assert (not (String.contains hel '\n'));
   assert (
-    Yojson.Basic.from_string hel
+    J.from_string hel
     = worktree_document
         {
           path = "/tmp/clicked";
@@ -479,7 +605,7 @@ let () =
         });
   let hello = Remote_dev.Home.stream_output "lo" in
   assert (
-    Yojson.Basic.from_string hello
+    J.from_string hello
     = worktree_document
         {
           path = "/tmp/clicked";
@@ -488,7 +614,7 @@ let () =
           error = None;
         });
   assert (
-    Yojson.Basic.from_string (Remote_dev.Home.stream_error "failed")
+    J.from_string (Remote_dev.Home.stream_error "failed")
     = worktree_document
         {
           path = "/tmp/clicked";

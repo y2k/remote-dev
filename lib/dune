@@ -1,3 +1,5 @@
 (library
  (name remote_dev)
- (libraries eio httpun httpun-eio unix yojson))
+ (libraries eio httpun httpun-eio unix yojson)
+ (preprocess
+  (pps ppx_deriving_yojson)))

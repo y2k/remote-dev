@@ -18,6 +18,7 @@ import org.junit.Assert.fail
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.json.JSONArray
 import org.json.JSONObject
 
 @RunWith(AndroidJUnit4::class)
@@ -34,31 +35,31 @@ class BackendUiParserTest {
                     UiNode.Row(
                         listOf(
                             UiNode.Button("OK"),
-                            UiNode.Button("New", UiEvent("{\"type\":\"new\"}")),
-                            UiNode.Input("Input", UiEvent("{\"type\":\"input\"}")),
+                            UiNode.Button("New", UiEvent("[\"New\"]")),
+                            UiNode.Input("Input", UiEvent("[\"Input\"]")),
                         ),
                     ),
                 ),
             ),
             parseUiNode(
-                """{"@type":"column","children":[{"@type":"text","text":"Worktrees"},{"@type":"row","children":[{"@type":"button","label":"OK"},{"@type":"button","label":"New","event":{"type":"new"}},{"@type":"input","label":"Input","event":{"type":"input"}}]}]}""",
+                """{"@type":"column","children":[{"@type":"text","text":"Worktrees"},{"@type":"row","children":[{"@type":"button","label":"OK"},{"@type":"button","label":"New","event":["New"]},{"@type":"input","label":"Input","event":["Input"]}]}]}""",
             ),
         )
 
         val worktreeButton =
             parseUiNode(
-                """{"@type":"button","label":"Worktree","event":{"type":"select_worktree","path":"/tmp/clicked"}}""",
+                """{"@type":"button","label":"Worktree","event":["Worktrees_msg",["Select","/tmp/clicked"]]}""",
             ) as UiNode.Button
         assertEquals("Worktree", worktreeButton.label)
         assertEquals(
             "/tmp/clicked",
-            JSONObject(requireNotNull(worktreeButton.event).json).getString("path"),
+            JSONArray(requireNotNull(worktreeButton.event).json).getJSONArray(1).getString(1),
         )
 
         assertEquals(
-            UiNode.Input("Input", UiEvent("{\"type\":\"input\"}"), "draft"),
+            UiNode.Input("Input", UiEvent("[\"Input\"]"), "draft"),
             parseUiNode(
-                """{"@type":"input","label":"Input","event":{"type":"input"},"text":"draft"}""",
+                """{"@type":"input","label":"Input","event":["Input"],"text":"draft"}""",
             ),
         )
 
@@ -86,13 +87,20 @@ class BackendUiParserTest {
     @Test
     fun buildsEventRequestEnvelope() {
         val request =
-            JSONObject(eventRequest(UiEvent("{\"type\":\"run_claude\"}"), "draft"))
+            JSONObject(eventRequest(UiEvent("[\"Worktree_msg\",[\"Run_claude\",\"__VALUE__\"]]"), "draft"))
 
-        assertEquals("run_claude", request.getJSONObject("event").getString("type"))
+        assertEquals(
+            "Run_claude",
+            request.getJSONArray("event").getJSONArray(1).getString(0),
+        )
         assertEquals("draft", request.getString("value"))
         assertEquals(
             true,
-            JSONObject(eventRequest(UiEvent("{\"type\":\"load\"}"), null)).isNull("value"),
+            JSONObject(eventRequest(UiEvent("[\"Worktrees_msg\",[\"Load\"]]"), null)).isNull("value"),
+        )
+        assertEquals(
+            true,
+            JSONObject(eventRequest(UiEvent("[\"Worktrees_msg\",[\"Load\"]]"), null)).has("value"),
         )
     }
 
@@ -119,7 +127,7 @@ class BackendUiParserTest {
         var submitted: Pair<UiEvent, String>? = null
         composeRule.setContent {
             UiNodeContent(
-                UiNode.Input("Input", UiEvent("{\"type\":\"input\"}")),
+                UiNode.Input("Input", UiEvent("[\"Input\"]")),
                 {},
                 { event, value -> submitted = event to value },
                 false,
@@ -133,7 +141,7 @@ class BackendUiParserTest {
         }
 
         composeRule.runOnIdle {
-            assertEquals(UiEvent("{\"type\":\"input\"}") to "draft", submitted)
+            assertEquals(UiEvent("[\"Input\"]") to "draft", submitted)
         }
     }
 
@@ -142,7 +150,7 @@ class BackendUiParserTest {
         var submitted: UiEvent? = null
         composeRule.setContent {
             UiNodeContent(
-                UiNode.Button("Worktree", UiEvent("{\"type\":\"select_worktree\"}")),
+                UiNode.Button("Worktree", UiEvent("[\"Select\"]")),
                 { event -> submitted = event },
                 { _, _ -> },
                 false,
@@ -152,7 +160,7 @@ class BackendUiParserTest {
         composeRule.onNodeWithText("Worktree").performClick()
 
         composeRule.runOnIdle {
-            assertEquals(UiEvent("{\"type\":\"select_worktree\"}"), submitted)
+            assertEquals(UiEvent("[\"Select\"]"), submitted)
         }
     }
 
@@ -162,7 +170,7 @@ class BackendUiParserTest {
         var inProgress by mutableStateOf(false)
         composeRule.setContent {
             UiNodeContent(
-                UiNode.Input("Input", UiEvent("{\"type\":\"input\"}")),
+                UiNode.Input("Input", UiEvent("[\"Input\"]")),
                 {},
                 { _, _ ->
                     calls++
@@ -191,7 +199,7 @@ class BackendUiParserTest {
         var inProgress by mutableStateOf(true)
         composeRule.setContent {
             UiNodeContent(
-                UiNode.Input("Input", UiEvent("{\"type\":\"input\"}")),
+                UiNode.Input("Input", UiEvent("[\"Input\"]")),
                 {},
                 { _, _ -> calls++ },
                 inProgress,
@@ -214,7 +222,7 @@ class BackendUiParserTest {
         composeRule.setContent {
             UiNodeContent(
                 parseUiNode(
-                    """{"@type":"input","label":"Input","event":{"type":"input"},"text":"seed"}""",
+                    """{"@type":"input","label":"Input","event":["Input"],"text":"seed"}""",
                 ),
                 {},
                 { _, _ -> },
@@ -232,14 +240,14 @@ class BackendUiParserTest {
 
     @Test
     fun inputUsesTextFromReplacementDocument() {
-        var node by mutableStateOf<UiNode>(UiNode.Input("Input", UiEvent("{\"type\":\"input\"}"), "seed"))
+        var node by mutableStateOf<UiNode>(UiNode.Input("Input", UiEvent("[\"Input\"]"), "seed"))
         composeRule.setContent {
             UiNodeContent(node, {}, { _, _ -> }, false)
         }
 
         composeRule.onNodeWithTag("input").performTextInput("-draft")
         composeRule.runOnIdle {
-            node = UiNode.Input("Input", UiEvent("{\"type\":\"input\"}"), "returned")
+            node = UiNode.Input("Input", UiEvent("[\"Input\"]"), "returned")
         }
 
         composeRule.onNodeWithTag("input").assertTextContains("returned")

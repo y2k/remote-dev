@@ -1,4 +1,4 @@
-type worktree = { path : string; branch : string }
+type worktree = { path : string; branch : string } [@@deriving yojson]
 
 let load_worktrees (path : string) : worktree list =
   let command =

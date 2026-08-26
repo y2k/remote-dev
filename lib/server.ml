@@ -1,9 +1,38 @@
+let document state = Yojson.Safe.pretty_to_string (Home.Home.to_json state)
+let stream_document state = Yojson.Safe.to_string (Home.Home.to_json state)
+
+let stream_body state cmd =
+  let documents = ref [ stream_document state ] in
+  let rec run cmd =
+    match Home.Cmd.run cmd with
+    | None -> ()
+    | Some message ->
+        let state, next = Home.step message in
+        documents := stream_document state :: !documents;
+        run next
+  in
+  run cmd;
+  String.concat "\n" (List.rev !documents) ^ "\n"
+
+let initialize () =
+  let state, cmd = Home.init () in
+  Atomic.set Home.state state;
+  match Home.Cmd.run cmd with
+  | None -> ()
+  | Some message -> ignore (Home.dispatch message)
+
 let response ?(body = "") meth target =
   match (meth, target) with
+  | `GET, "/" -> (`OK, document (Atomic.get Home.state), "application/json")
   | `POST, "/" -> (
-      match Home.response body with
-      | Ok body -> (`OK, body, "application/json")
-      | Error message -> (`Bad_request, message, "text/plain"))
+      match Home.decode body with
+      | Error message -> (`Bad_request, message, "text/plain")
+      | Ok message -> (
+          let state, cmd = Home.step message in
+          match cmd with
+          | Home.Cmd.Empty -> (`OK, document state, "application/json")
+          | Home.Cmd.Run _ ->
+              (`OK, stream_body state cmd, "application/x-ndjson")))
   | _ -> (`Not_found, "Not Found", "text/plain")
 
 let stream_headers =
@@ -60,6 +89,29 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
     Eio.Fiber.both producer consumer;
     Httpun.Body.Writer.close writer
   in
+  let stream_ui state cmd =
+    let writer =
+      Httpun.Reqd.respond_with_streaming ~flush_headers_immediately:true reqd
+        (Httpun.Response.create ~headers:stream_headers `OK)
+    in
+    let write state =
+      Httpun.Body.Writer.write_string writer (stream_document state ^ "\n");
+      let flushed, resolve = Eio.Promise.create () in
+      Httpun.Body.Writer.flush writer (fun _ -> Eio.Promise.resolve resolve ());
+      Eio.Promise.await flushed
+    in
+    write state;
+    let rec run cmd =
+      match Home.Cmd.run cmd with
+      | None -> ()
+      | Some message ->
+          let state, next = Home.step message in
+          write state;
+          run next
+    in
+    run cmd;
+    Httpun.Body.Writer.close writer
+  in
   (* ponytail: trusted local demo; bound bodies if the server becomes public. *)
   let body = Buffer.create 128 in
   let rec read () =
@@ -69,7 +121,20 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
         let body = Buffer.contents body in
         match Home.start_claude_stream body with
         | Some request -> stream request
-        | None -> reply (response ~body request.meth request.target))
+        | None -> (
+            match (request.meth, request.target) with
+            | `GET, "/" ->
+                reply (`OK, document (Atomic.get Home.state), "application/json")
+            | `POST, "/" -> (
+                match Home.decode body with
+                | Error message -> reply (`Bad_request, message, "text/plain")
+                | Ok message -> (
+                    let state, cmd = Home.step message in
+                    match cmd with
+                    | Home.Cmd.Empty ->
+                        reply (`OK, document state, "application/json")
+                    | Home.Cmd.Run _ -> stream_ui state cmd))
+            | _ -> reply (`Not_found, "Not Found", "text/plain")))
       ~on_read:(fun chunk ~off ~len ->
         Buffer.add_string body (Bigstringaf.substring chunk ~off ~len);
         read ())
@@ -77,6 +142,7 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
   read ()
 
 let run ~net ~domain_mgr =
+  initialize ();
   Eio.Switch.run @@ fun sw ->
   let socket =
     Eio.Net.listen ~sw ~reuse_addr:true ~backlog:128 net

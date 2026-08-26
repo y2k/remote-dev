@@ -1,5 +1,6 @@
 .PHONY: test
 test:
+	dune build @unused-libs
 	dune test
 
 .PHONY: run

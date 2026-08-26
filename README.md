@@ -73,18 +73,30 @@ On Android 17 and later, grant the app Local Network Access permission before it
 
 ## HTTP Protocol
 
-The server accepts only `POST /` with a JSON event envelope:
+The server loads the initial worktree list before accepting HTTP requests. The client
+starts a UI session with `GET /`, which returns the current document as
+`application/json`.
+
+Interactive UI nodes use `POST /` with a JSON event envelope. The client copies the
+event value advertised by the node into `event`:
 
 ```json
 {
-  "event": { "type": "load" },
+  "event": ["Worktrees_msg", ["Load"]],
   "value": null
 }
 ```
 
-`value` is either a string or `null`. Valid events other than a successful `run_claude` return one complete `application/json` UI document. Current event types are `load`, `select_worktree` (with a `path` field), `run_claude`, and `back`.
+`value` is either a string or `null`; the server substitutes a string value for the
+`"__VALUE__"` marker in an input event. Events without a command return one complete
+`application/json` UI document. Events that load worktrees, including manual refresh
+and `back` from a selected worktree, return `application/x-ndjson` with the document
+before and after the load command.
 
-A successful `run_claude` returns `application/x-ndjson`. Each nonempty line is a compact complete UI document with the accumulated Claude text; the Android client replaces its displayed document for every line until the response closes. If Claude fails after the stream starts, the final document contains the error.
+A successful `run_claude` also returns `application/x-ndjson`. Each nonempty line is
+a compact complete UI document with the accumulated Claude text; the Android client
+replaces its displayed document for every line until the response closes. If Claude
+fails after the stream starts, the final document contains the error.
 
 The UI document supports these nodes:
 
@@ -94,7 +106,8 @@ The UI document supports these nodes:
 - `button`: a `label` string and optional backend `event`.
 - `input`: a `label`, backend `event`, and optional initial `text`.
 
-The Android client treats each event object as backend-defined JSON. `input` submits its current value as the envelope's `value` field.
+The Android client treats each event value as backend-defined JSON. `input` submits
+its current value as the envelope's `value` field.
 
 ## Development
 

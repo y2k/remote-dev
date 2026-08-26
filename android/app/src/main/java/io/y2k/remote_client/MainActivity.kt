@@ -35,14 +35,15 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
+import io.ktor.client.request.prepareGet
 import io.ktor.client.request.preparePost
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
-import io.y2k.remote_client.ui.theme.MyApplicationTheme
 import io.ktor.utils.io.readLine
+import io.y2k.remote_client.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -125,13 +126,13 @@ private fun parseUiNode(node: JSONObject): UiNode {
 
 private fun parseEvent(node: JSONObject, nodeName: String): UiEvent {
     val value =
-        node.get("event") as? JSONObject
-            ?: throw IllegalArgumentException("$nodeName event must be an object")
+        node.get("event") as? JSONArray
+            ?: throw IllegalArgumentException("$nodeName event must be an array")
     return UiEvent(value.toString())
 }
 
 fun eventRequest(event: UiEvent, value: String?): String =
-    JSONObject().put("event", JSONObject(event.json)).put("value", value ?: JSONObject.NULL).toString()
+    JSONObject().put("event", JSONArray(event.json)).put("value", value ?: JSONObject.NULL).toString()
 
 class MainActivity : ComponentActivity() {
     private val client = HttpClient(Android)
@@ -179,10 +180,10 @@ private fun App(client: HttpClient) {
     var eventInProgress by remember { mutableStateOf(false) }
     var eventError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    val loadEvent = UiEvent("""{"type":"load"}""")
-    val backEvent = UiEvent("""{"type":"back"}""")
+    val loadEvent = UiEvent("""["Worktrees_msg",["Load"]]""")
+    val backEvent = UiEvent("""["Back"]""")
 
-    fun sendEvent(event: UiEvent, value: String?, refreshing: Boolean = false) {
+    fun sendRequest(refreshing: Boolean = false, request: suspend () -> Unit) {
         if (eventInProgress) return
         scope.launch {
             eventInProgress = true
@@ -190,25 +191,9 @@ private fun App(client: HttpClient) {
             val previous = state
             if (previous !is ScreenState.Content) state = ScreenState.Loading
             try {
-                client
-                    .preparePost(BuildConfig.BACKEND_URL) {
-                        contentType(io.ktor.http.ContentType.Application.Json)
-                        setBody(eventRequest(event, value))
-                    }.execute { response ->
-                    if (response.headers[HttpHeaders.ContentType]?.startsWith("application/x-ndjson") == true) {
-                        val body = response.bodyAsChannel()
-                        while (true) {
-                            val line = body.readLine() ?: break
-                            if (line.isNotEmpty()) {
-                                state = ScreenState.Content(parseUiNode(line))
-                                withFrameNanos {}
-                            }
-                        }
-                    } else {
-                        state = ScreenState.Content(parseUiNode(response.bodyAsText()))
-                    }
-                }
+                request()
             } catch (error: Exception) {
+                error.printStackTrace() // FIXME:
                 if (previous is ScreenState.Content) {
                     state = previous
                     eventError = error.message ?: "Unable to submit event"
@@ -222,12 +207,46 @@ private fun App(client: HttpClient) {
         }
     }
 
+    suspend fun renderResponse(response: io.ktor.client.statement.HttpResponse) {
+        if (
+            response.headers[HttpHeaders.ContentType]?.startsWith("application/x-ndjson") == true
+        ) {
+            val body = response.bodyAsChannel()
+            while (true) {
+                val line = body.readLine() ?: break
+                if (line.isNotEmpty()) {
+                    state = ScreenState.Content(parseUiNode(line))
+                    withFrameNanos {}
+                }
+            }
+        } else {
+            state = ScreenState.Content(parseUiNode(response.bodyAsText()))
+        }
+    }
+
+    fun sendEvent(event: UiEvent, value: String?, refreshing: Boolean = false) {
+        sendRequest(refreshing) {
+            client
+                .preparePost(BuildConfig.BACKEND_URL) {
+                    contentType(io.ktor.http.ContentType.Application.Json)
+                    setBody(eventRequest(event, value))
+                }
+                .execute(::renderResponse)
+        }
+    }
+
+    fun loadInitial() {
+        sendRequest {
+            client.prepareGet(BuildConfig.BACKEND_URL).execute(::renderResponse)
+        }
+    }
+
     BackHandler(enabled = state is ScreenState.Content) {
         if (!eventInProgress) sendEvent(backEvent, null)
     }
 
     LaunchedEffect(allowed) {
-        if (allowed) sendEvent(loadEvent, null)
+        if (allowed) loadInitial()
     }
 
     fun refresh() {

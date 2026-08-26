@@ -24,7 +24,8 @@
    eio
    eio_main
    httpun-eio
-   yojson)
+   yojson
+   ppx_deriving_yojson)
  (tags
   ("add topics" "to describe" your project)))
 
