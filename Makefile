@@ -1,7 +1,10 @@
 .PHONY: test
-test:
-	dune build @unused-libs
+test: build
 	dune test
+
+.PHONY: build
+build:
+	dune build @unused-libs
 
 .PHONY: run
 run:

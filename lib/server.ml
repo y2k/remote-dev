@@ -4,7 +4,7 @@ let stream_document state = Yojson.Safe.to_string (Home.Home.to_json state)
 let stream_body state cmd =
   let documents = ref [ stream_document state ] in
   let rec run cmd =
-    match Home.Cmd.run cmd with
+    match Components.Cmd.run cmd with
     | None -> ()
     | Some message ->
         let state, next = Home.step message in
@@ -17,7 +17,7 @@ let stream_body state cmd =
 let initialize () =
   let state, cmd = Home.init () in
   Atomic.set Home.state state;
-  match Home.Cmd.run cmd with
+  match Components.Cmd.run cmd with
   | None -> ()
   | Some message -> ignore (Home.dispatch message)
 
@@ -30,8 +30,8 @@ let response ?(body = "") meth target =
       | Ok message -> (
           let state, cmd = Home.step message in
           match cmd with
-          | Home.Cmd.Empty -> (`OK, document state, "application/json")
-          | Home.Cmd.Run _ ->
+          | Components.Cmd.Empty -> (`OK, document state, "application/json")
+          | Components.Cmd.Run _ ->
               (`OK, stream_body state cmd, "application/x-ndjson")))
   | _ -> (`Not_found, "Not Found", "text/plain")
 
@@ -71,8 +71,9 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
       let result =
         try
           Eio.Domain_manager.run domain_mgr (fun () ->
-              Runtime.stream_claude cwd prompt (fun delta ->
-                  Eio.Stream.add updates (`Delta delta)));
+              Runtime.with_unix_process (fun () ->
+                  Runtime.stream_claude cwd prompt (fun delta ->
+                      Eio.Stream.add updates (`Delta delta))));
           `Done
         with exn -> `Error (Printexc.to_string exn)
       in
@@ -102,7 +103,7 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
     in
     write state;
     let rec run cmd =
-      match Home.Cmd.run cmd with
+      match Components.Cmd.run cmd with
       | None -> ()
       | Some message ->
           let state, next = Home.step message in
@@ -131,9 +132,9 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
                 | Ok message -> (
                     let state, cmd = Home.step message in
                     match cmd with
-                    | Home.Cmd.Empty ->
+                    | Components.Cmd.Empty ->
                         reply (`OK, document state, "application/json")
-                    | Home.Cmd.Run _ -> stream_ui state cmd))
+                    | Components.Cmd.Run _ -> stream_ui state cmd))
             | _ -> reply (`Not_found, "Not Found", "text/plain")))
       ~on_read:(fun chunk ~off ~len ->
         Buffer.add_string body (Bigstringaf.substring chunk ~off ~len);

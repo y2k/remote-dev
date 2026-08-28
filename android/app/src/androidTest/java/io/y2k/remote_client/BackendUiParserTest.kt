@@ -1,25 +1,25 @@
 package io.y2k.remote_client
 
-import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performTextInput
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.fail
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.json.JSONArray
-import org.json.JSONObject
 
 @RunWith(AndroidJUnit4::class)
 @OptIn(ExperimentalTestApi::class)
@@ -37,19 +37,20 @@ class BackendUiParserTest {
                             UiNode.Button("OK"),
                             UiNode.Button("New", UiEvent("[\"New\"]")),
                             UiNode.Input("Input", UiEvent("[\"Input\"]")),
-                        ),
+                        )
                     ),
-                ),
+                )
             ),
             parseUiNode(
-                """{"@type":"column","children":[{"@type":"text","text":"Worktrees"},{"@type":"row","children":[{"@type":"button","label":"OK"},{"@type":"button","label":"New","event":["New"]},{"@type":"input","label":"Input","event":["Input"]}]}]}""",
+                """{"@type":"column","children":[{"@type":"text","text":"Worktrees"},{"@type":"row","children":[{"@type":"button","label":"OK"},{"@type":"button","label":"New","event":["New"]},{"@type":"input","label":"Input","event":["Input"]}]}]}"""
             ),
         )
 
         val worktreeButton =
             parseUiNode(
-                """{"@type":"button","label":"Worktree","event":["Worktrees_msg",["Select","/tmp/clicked"]]}""",
-            ) as UiNode.Button
+                """{"@type":"button","label":"Worktree","event":["Worktrees_msg",["Select","/tmp/clicked"]]}"""
+            )
+                as UiNode.Button
         assertEquals("Worktree", worktreeButton.label)
         assertEquals(
             "/tmp/clicked",
@@ -58,36 +59,36 @@ class BackendUiParserTest {
 
         assertEquals(
             UiNode.Input("Input", UiEvent("[\"Input\"]"), "draft"),
-            parseUiNode(
-                """{"@type":"input","label":"Input","event":["Input"],"text":"draft"}""",
-            ),
+            parseUiNode("""{"@type":"input","label":"Input","event":["Input"],"text":"draft"}"""),
         )
 
         listOf(
-            """{"@type":"text"}""",
-            """{"@type":"text","text":1}""",
-            """{"@type":"row"}""",
-            """{"@type":"row","children":{}}""",
-            """{"@type":"row","children":["bad"]}""",
-            """{"@type":"button","label":"Event","event":"not-an-object"}""",
-            """{"@type":"input","event":{"type":"input"}}""",
-            """{"@type":"input","label":1,"event":{"type":"input"}}""",
-            """{"@type":"input","label":"Input"}""",
-            """{"@type":"input","label":"Input","event":"not-an-object"}""",
-            """{"@type":"input","label":"Input","event":{"type":"input"},"text":1}""",
-        ).forEach { json ->
-            try {
-                parseUiNode(json)
-                fail("Unsupported document was accepted: $json")
-            } catch (_: Exception) {
+                """{"@type":"text"}""",
+                """{"@type":"text","text":1}""",
+                """{"@type":"row"}""",
+                """{"@type":"row","children":{}}""",
+                """{"@type":"row","children":["bad"]}""",
+                """{"@type":"button","label":"Event","event":"not-an-object"}""",
+                """{"@type":"input","event":{"type":"input"}}""",
+                """{"@type":"input","label":1,"event":{"type":"input"}}""",
+                """{"@type":"input","label":"Input"}""",
+                """{"@type":"input","label":"Input","event":"not-an-object"}""",
+                """{"@type":"input","label":"Input","event":{"type":"input"},"text":1}""",
+            )
+            .forEach { json ->
+                try {
+                    parseUiNode(json)
+                    fail("Unsupported document was accepted: $json")
+                } catch (_: Exception) {}
             }
-        }
     }
 
     @Test
     fun buildsEventRequestEnvelope() {
         val request =
-            JSONObject(eventRequest(UiEvent("[\"Worktree_msg\",[\"Run_claude\",\"__VALUE__\"]]"), "draft"))
+            JSONObject(
+                eventRequest(UiEvent("[\"Worktree_msg\",[\"Run_claude\",\"__VALUE__\"]]"), "draft")
+            )
 
         assertEquals(
             "Run_claude",
@@ -96,7 +97,8 @@ class BackendUiParserTest {
         assertEquals("draft", request.getString("value"))
         assertEquals(
             true,
-            JSONObject(eventRequest(UiEvent("[\"Worktrees_msg\",[\"Load\"]]"), null)).isNull("value"),
+            JSONObject(eventRequest(UiEvent("[\"Worktrees_msg\",[\"Load\"]]"), null))
+                .isNull("value"),
         )
         assertEquals(
             true,
@@ -108,9 +110,10 @@ class BackendUiParserTest {
     fun replacesDisplayedDocumentForEachStreamedLine() {
         val documents =
             listOf(
-                """{"@type":"text","text":"Hel"}""",
-                """{"@type":"text","text":"Hello"}""",
-            ).map(::parseUiNode)
+                    """{"@type":"text","text":"Hel"}""",
+                    """{"@type":"text","text":"Hello"}""",
+                )
+                .map(::parseUiNode)
         var node by mutableStateOf(documents.first())
         composeRule.setContent { UiNodeContent(node, {}, { _, _ -> }, false) }
 
@@ -222,7 +225,7 @@ class BackendUiParserTest {
         composeRule.setContent {
             UiNodeContent(
                 parseUiNode(
-                    """{"@type":"input","label":"Input","event":["Input"],"text":"seed"}""",
+                    """{"@type":"input","label":"Input","event":["Input"],"text":"seed"}"""
                 ),
                 {},
                 { _, _ -> },

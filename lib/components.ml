@@ -5,6 +5,17 @@ type 'event t =
   | Text of string
   | Edit of string * string option * 'event
 
+module Cmd = struct
+  type 'msg t = Empty | Run of (unit -> 'msg option)
+
+  let none = Empty
+  let run = function Empty -> Option.none | Run cmd -> cmd ()
+
+  let map f = function
+    | Empty -> Empty
+    | Run cmd -> Run (fun () -> Option.map f (cmd ()))
+end
+
 let button ?event title = Button (title, event)
 let column children = Column children
 let row children = Row children

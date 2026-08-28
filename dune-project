@@ -5,28 +5,31 @@
 (generate_opam_files true)
 
 (source
- (github username/reponame))
+ (github y2k/remote-dev))
 
-(authors "Author Name <author@example.com>")
+(authors "y2k <itwisterlx@gmail.com>")
 
-(maintainers "Maintainer Name <maintainer@example.com>")
+(maintainers "y2k <itwisterlx@gmail.com>")
 
-(license LICENSE)
+(license GPL-3.0-only)
 
-(documentation https://url/to/documentation)
+(pin
+ (url "git+https://github.com/y2k/ppx_deriving_yojson.git")
+ (package (name ppx_deriving_yojson)))
 
 (package
  (name remote_dev)
- (synopsis "A short synopsis")
- (description "A longer description")
+ (synopsis "Remote development tool with an Android client")
+ (description
+  "Browse Git worktrees from an Android client and send prompts to the locally installed Claude CLI.")
   (depends
-   ocaml
+    (ocaml (>= 5.3))
    eio
    eio_main
    httpun-eio
    yojson
    ppx_deriving_yojson)
  (tags
-  ("add topics" "to describe" your project)))
+  ("development" "git" "android")))
 
 ; See the complete stanza docs at https://dune.readthedocs.io/en/stable/reference/dune-project/index.html

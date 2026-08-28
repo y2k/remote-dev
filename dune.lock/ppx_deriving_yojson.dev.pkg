@@ -1,0 +1,19 @@
+(version dev)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
+
+(depends
+ (all_platforms
+  (ocaml dune yojson ppx_deriving ppxlib)))
+
+(source
+ (fetch
+  (url
+   git+https://github.com/y2k/ppx_deriving_yojson.git#b10a96dfb024b81176ffab2bb32e3ae80aa76b43)))
+
+(dev)

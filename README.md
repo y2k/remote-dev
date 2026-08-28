@@ -24,7 +24,7 @@ The server returns a backend-defined UI document. The Android client renders tha
 
 ## Prerequisites
 
-- A POSIX environment with an OCaml/Dune toolchain and the dependencies declared in `remote_dev.opam`.
+- A POSIX environment with Dune 3.24 or newer. Dune obtains the OCaml compiler and project dependencies from `dune.lock` on the first build.
 - Git.
 - The `claude` CLI installed, authenticated, and available on `PATH` for the server process.
 - Android Studio or an Android SDK setup that can build the `android/` Gradle project.

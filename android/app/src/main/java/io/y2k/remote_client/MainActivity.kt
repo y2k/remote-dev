@@ -132,7 +132,10 @@ private fun parseEvent(node: JSONObject, nodeName: String): UiEvent {
 }
 
 fun eventRequest(event: UiEvent, value: String?): String =
-    JSONObject().put("event", JSONArray(event.json)).put("value", value ?: JSONObject.NULL).toString()
+    JSONObject()
+        .put("event", JSONArray(event.json))
+        .put("value", value ?: JSONObject.NULL)
+        .toString()
 
 class MainActivity : ComponentActivity() {
     private val client = HttpClient(Android)
@@ -208,9 +211,7 @@ private fun App(client: HttpClient) {
     }
 
     suspend fun renderResponse(response: io.ktor.client.statement.HttpResponse) {
-        if (
-            response.headers[HttpHeaders.ContentType]?.startsWith("application/x-ndjson") == true
-        ) {
+        if (response.headers[HttpHeaders.ContentType]?.startsWith("application/x-ndjson") == true) {
             val body = response.bodyAsChannel()
             while (true) {
                 val line = body.readLine() ?: break
