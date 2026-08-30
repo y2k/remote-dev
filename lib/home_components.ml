@@ -10,7 +10,7 @@ module New_worktree = struct
     | Error of string
   [@@deriving yojson]
 
-  let initial = { error = None }
+  let init () = ({ error = None }, Cmd.none)
 
   let view { error } : msg Components.t =
     let content =
@@ -19,8 +19,6 @@ module New_worktree = struct
     match error with
     | None -> content
     | Some error -> column [ text ("Error: " ^ error); content ]
-
-  let enter () = (initial, Cmd.none)
 
   let update root model = function
     | Clear_error -> ({ error = None }, Cmd.none)
@@ -39,6 +37,73 @@ module New_worktree = struct
     | Error error -> ({ error = Some error }, Cmd.none)
 end
 
+module Emulator = struct
+  type model = {
+    emulators : Runtime.emulator list;
+    selected_emulator : string option;
+    error : string option;
+  }
+
+  type msg =
+    | Loaded of (Runtime.emulator list, string) result
+    | Select of string
+  [@@deriving yojson]
+
+  let view { emulators; selected_emulator; error } : msg Components.t =
+    let content =
+      match selected_emulator with
+      | Some serial -> (
+          match
+            List.find_opt
+              (fun (emulator : Runtime.emulator) -> emulator.serial = serial)
+              emulators
+          with
+          | Some emulator ->
+              column
+                [
+                  text "Emulators";
+                  row
+                    (List.map
+                       (fun (emulator : Runtime.emulator) ->
+                         button ~event:(Select emulator.serial) emulator.name)
+                       emulators);
+                  image
+                    ~src:("/emulators/" ^ serial ^ "/screenshot.png")
+                    ~label:emulator.name;
+                ]
+          | None -> column [ text "Emulators"; text "No running emulators" ])
+      | None -> column [ text "Emulators"; text "No running emulators" ]
+    in
+    match error with
+    | None -> content
+    | Some error -> column [ text ("Error: " ^ error); content ]
+
+  let load : msg Cmd.t =
+    Cmd.Run
+      (fun () ->
+        try Some (Loaded (Ok (Runtime.load_emulators ())))
+        with exn -> Some (Loaded (Error (Printexc.to_string exn))))
+
+  let init () =
+    ({ emulators = []; selected_emulator = None; error = None }, load)
+
+  let update model = function
+    | Loaded (Ok emulators) ->
+        let selected_emulator =
+          match emulators with
+          | (emulator : Runtime.emulator) :: _ -> Some emulator.serial
+          | [] -> None
+        in
+        ({ emulators; selected_emulator; error = None }, Cmd.none)
+    | Loaded (Error error) -> ({ model with error = Some error }, Cmd.none)
+    | Select serial
+      when List.exists
+             (fun (emulator : Runtime.emulator) -> emulator.serial = serial)
+             model.emulators ->
+        ({ model with selected_emulator = Some serial }, Cmd.none)
+    | Select _ -> (model, Cmd.none)
+end
+
 module Worktree = struct
   type model = {
     path : string;
@@ -54,9 +119,9 @@ module Worktree = struct
     | Output of string
     | Finished of (string, string) result
     | Error of string
-  [@@deriving yojson]
+  [@@deriving yojson, variants]
 
-  let initial path = { path; prompt = ""; output = None; error = None }
+  let init path = ({ path; prompt = ""; output = None; error = None }, Cmd.none)
 
   let view { path; prompt; output; error } : msg Components.t =
     let messages =
@@ -81,8 +146,6 @@ module Worktree = struct
     match error with
     | None -> content
     | Some error -> column [ text ("Error: " ^ error); content ]
-
-  let enter path = (initial path, Cmd.none)
 
   let update model = function
     | Clear_error -> ({ model with error = None }, Cmd.none)
@@ -113,8 +176,6 @@ module Worktrees = struct
     | Error of string
   [@@deriving yojson]
 
-  let initial = { worktrees = []; error = None }
-
   let view { worktrees; error } : msg Components.t =
     let worktrees =
       worktrees
@@ -140,7 +201,7 @@ module Worktrees = struct
         try Some (Loaded (Ok (Runtime.load_worktrees (root ()))))
         with exn -> Some (Loaded (Error (Printexc.to_string exn))))
 
-  let enter () = (initial, load)
+  let init () = ({ worktrees = []; error = None }, load)
 
   let update model = function
     | Load -> ({ model with error = None }, load)

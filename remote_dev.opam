@@ -16,6 +16,7 @@ depends: [
   "eio_main"
   "httpun-eio"
   "yojson"
+  "ppx_variants_conv" {>= "v0.17" & < "v0.18"}
   "ppx_deriving_yojson"
   "odoc" {with-doc}
 ]

@@ -5,6 +5,36 @@ let with_process ~check lines (status : Unix.process_status) f =
     List.iter on_line lines;
     Effect.Deep.continue k status
 
+let with_emulator_processes f =
+  try f () with
+  | effect
+      Remote_dev.Runtime.Process_lines
+        (Remote_dev.Runtime.Args ("adb", argv), on_line), k ->
+      let lines, status =
+        match argv with
+        | [| "adb"; "devices"; "-l" |] ->
+            ( [
+                "List of devices attached";
+                "emulator-5554\tdevice product:sdk";
+                "emulator-5556\tdevice product:sdk";
+                "physical-device\tdevice product:phone";
+              ],
+              Unix.WEXITED 0 )
+        | [| "adb"; "-s"; "emulator-5554"; "emu"; "avd"; "name" |] ->
+            ([ "Pixel"; "OK" ], Unix.WEXITED 0)
+        | [| "adb"; "-s"; "emulator-5556"; "emu"; "avd"; "name" |] ->
+            ([], Unix.WEXITED 1)
+        | _ -> assert false
+      in
+      List.iter on_line lines;
+      Effect.Deep.continue k status
+  | effect
+      Remote_dev.Runtime.Process_bytes (Remote_dev.Runtime.Args ("adb", argv)), k
+    ->
+      assert (
+        argv = [| "adb"; "-s"; "emulator-5554"; "exec-out"; "screencap"; "-p" |]);
+      Effect.Deep.continue k ("\137PNG", Unix.WEXITED 0)
+
 let check_claude cwd prompt = function
   | Remote_dev.Runtime.Args ("/bin/sh", argv) ->
       assert (
@@ -121,5 +151,31 @@ let () =
            ~check:(fun _ -> ())
            [] (Unix.WEXITED 1)
            (fun () -> Remote_dev.Runtime.load_worktrees root));
+      false
+    with Failure _ -> true);
+  let emulators = with_emulator_processes Remote_dev.Runtime.load_emulators in
+  assert (
+    emulators
+    = [
+        { Remote_dev.Runtime.serial = "emulator-5554"; name = "Pixel" };
+        { serial = "emulator-5556"; name = "emulator-5556" };
+      ]);
+  assert (
+    with_process
+      ~check:(function
+        | Remote_dev.Runtime.Args ("adb", [| "adb"; "devices"; "-l" |]) -> ()
+        | Remote_dev.Runtime.Shell _ | Remote_dev.Runtime.Args _ -> assert false)
+      [] (Unix.WEXITED 0) Remote_dev.Runtime.load_emulators
+    = []);
+  assert (
+    with_emulator_processes (fun () ->
+        Remote_dev.Runtime.capture_emulator_screenshot "emulator-5554")
+    = "\137PNG");
+  assert (
+    try
+      ignore
+        (try Remote_dev.Runtime.capture_emulator_screenshot "emulator-5554"
+         with effect Remote_dev.Runtime.Process_bytes _, k ->
+           Effect.Deep.continue k ("", Unix.WEXITED 1));
       false
     with Failure _ -> true)

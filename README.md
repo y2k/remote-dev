@@ -17,7 +17,8 @@ Android client
     v
 OCaml / Eio server on :8080
     |-- git worktree list
-    `-- claude --print stream-json in the selected worktree
+    |-- claude --print stream-json in the selected worktree
+    `-- adb devices and screencap for selected Android emulators
 ```
 
 The server returns a backend-defined UI document. The Android client renders that document and sends events back to the server.
@@ -27,6 +28,7 @@ The server returns a backend-defined UI document. The Android client renders tha
 - A POSIX environment with Dune 3.24 or newer. Dune obtains the OCaml compiler and project dependencies from `dune.lock` on the first build.
 - Git.
 - The `claude` CLI installed, authenticated, and available on `PATH` for the server process.
+- Android Platform Tools (`adb`) on `PATH` when using emulator screenshots.
 - Android Studio or an Android SDK setup that can build the `android/` Gradle project.
 - An Android device on the same trusted LAN as the backend.
 
@@ -73,9 +75,9 @@ On Android 17 and later, grant the app Local Network Access permission before it
 
 ## HTTP Protocol
 
-The server loads the initial worktree list before accepting HTTP requests. The client
-starts a UI session with `GET /`, which returns the current document as
-`application/json`.
+The server loads running ADB emulators once, then loads the initial worktree list,
+before accepting HTTP requests. The client starts a UI session with `GET /`, which
+returns the current document as `application/json`.
 
 Interactive UI nodes use `POST /` with a JSON event envelope. The client copies the
 event value advertised by the node into `event`:
@@ -98,13 +100,42 @@ a compact complete UI document with the accumulated Claude text; the Android cli
 replaces its displayed document for every line until the response closes. If Claude
 fails after the stream starts, the final document contains the error.
 
+The emulator panel appears on every screen. Its buttons send a root event such as
+`["Emulator_msg",["Select","emulator-5554"]]`. The selected serial is global and
+remains in backend memory while navigating; restarting the backend creates a fresh
+selection. A device stopped after startup remains selected, so the client displays
+the screenshot error until that device is available again or the backend restarts.
+
+The client refreshes the selected emulator screenshot independently every three
+seconds. Each image source is a `GET /emulators/<serial>/screenshot.png` response
+with `image/png` and `Cache-Control: no-store`; a stopped or unknown emulator returns
+a non-success response.
+
 The UI document supports these nodes:
 
 - `column`: vertically arranged `children`.
-- `row`: horizontally arranged `children`.
+- `row`: horizontally arranged `children`. An optional `weights` array contains
+  one positive number per child and divides the available width proportionally;
+  without it, children keep their content-sized widths.
 - `text`: a `text` string.
 - `button`: a `label` string and optional backend `event`.
 - `input`: a `label`, backend `event`, and optional initial `text`.
+- `image`: a backend-relative `src` path beginning with `/` but not `//`, plus a
+  `label`. The client resolves it against the configured backend origin.
+
+Every screen uses one root weighted row with the current screen first and the
+emulator panel second:
+
+```json
+{
+  "@type": "row",
+  "children": [
+    { "@type": "column", "children": [] },
+    { "@type": "column", "children": [] }
+  ],
+  "weights": [2, 1]
+}
+```
 
 The Android client treats each event value as backend-defined JSON. `input` submits
 its current value as the envelope's `value` field.

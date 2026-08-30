@@ -28,6 +28,7 @@
    eio_main
    httpun-eio
    yojson
+   (ppx_variants_conv (and (>= v0.17) (< v0.18)))
    ppx_deriving_yojson)
  (tags
   ("development" "git" "android")))

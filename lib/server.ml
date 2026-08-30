@@ -1,5 +1,100 @@
-let document state = Yojson.Safe.pretty_to_string (Home.Home.to_json state)
-let stream_document state = Yojson.Safe.to_string (Home.Home.to_json state)
+module J = Yojson.Safe
+open Home_components
+
+type request = { event : J.t; value : string option }
+
+let field name fields = List.assoc_opt name fields
+
+let decode_request body =
+  try
+    match J.from_string body with
+    | `Assoc fields -> (
+        match (field "event" fields, field "value" fields) with
+        | Some event, Some ((`Null | `String _) as value) ->
+            Ok
+              {
+                event;
+                value =
+                  (match value with
+                  | `String value -> Some value
+                  | `Null -> None);
+              }
+        | _ -> Error "Invalid event request")
+    | _ -> Error "Invalid event request"
+  with Yojson.Json_error _ -> Error "Invalid event request"
+
+let rec replace_value value = function
+  | `String "__VALUE__" -> `String value
+  | `Assoc fields ->
+      `Assoc
+        (List.map (fun (key, json) -> (key, replace_value value json)) fields)
+  | `List values -> `List (List.map (replace_value value) values)
+  | json -> json
+
+let decode body =
+  match decode_request body with
+  | Error _ as error -> error
+  | Ok { event; value } ->
+      Home.msg_of_yojson (replace_value (Option.value ~default:"" value) event)
+
+let to_json model = Components.to_json Home.msg_to_yojson (Home.view model)
+let document model = J.pretty_to_string (to_json model)
+let stream_document model = J.to_string (to_json model)
+let initial = Home.init () |> fst
+let state = Atomic.make initial
+let reset () = Atomic.set state initial
+
+let step message =
+  let next, cmd = Home.update (Atomic.get state) message in
+  Atomic.set state next;
+  (next, cmd)
+
+let rec dispatch message =
+  let next, cmd = step message in
+  match Components.Cmd.run cmd with
+  | None -> next
+  | Some message -> dispatch message
+
+type claude_stream = { cwd : string; prompt : string }
+
+let start_claude_stream body =
+  match decode body with
+  | Ok (Home.Worktree_msg (Worktree.Run_claude prompt) as message) -> (
+      let next, _ = step message in
+      match next.screen with
+      | Home.Worktree { path; _ } -> Some { cwd = path; prompt }
+      | Home.Worktrees _ | Home.New_worktree _ -> None)
+  | Ok _ | Error _ -> None
+
+let stream_output output =
+  J.to_string (to_json (dispatch (Home.Worktree_msg (Worktree.Output output))))
+
+let stream_error error =
+  J.to_string
+    (to_json (dispatch (Home.Worktree_msg (Worktree.Finished (Error error)))))
+
+let screenshot_serial target =
+  let prefix = "/emulators/" and suffix = "/screenshot.png" in
+  let length = String.length target in
+  if
+    String.starts_with ~prefix target
+    && String.ends_with ~suffix target
+    && length > String.length prefix + String.length suffix
+  then
+    let serial =
+      String.sub target (String.length prefix)
+        (length - String.length prefix - String.length suffix)
+    in
+    if String.contains serial '/' then None else Some serial
+  else None
+
+let screenshot_response serial =
+  if
+    Runtime.load_emulators ()
+    |> List.exists (fun (emulator : Runtime.emulator) ->
+        emulator.serial = serial)
+  then (`OK, Runtime.capture_emulator_screenshot serial, "image/png")
+  else (`Not_found, "Emulator Not Found", "text/plain")
 
 let stream_body state cmd =
   let documents = ref [ stream_document state ] in
@@ -7,7 +102,7 @@ let stream_body state cmd =
     match Components.Cmd.run cmd with
     | None -> ()
     | Some message ->
-        let state, next = Home.step message in
+        let state, next = step message in
         documents := stream_document state :: !documents;
         run next
   in
@@ -15,20 +110,24 @@ let stream_body state cmd =
   String.concat "\n" (List.rev !documents) ^ "\n"
 
 let initialize () =
-  let state, cmd = Home.init () in
-  Atomic.set Home.state state;
+  let model, cmd = Home.init () in
+  Atomic.set state model;
   match Components.Cmd.run cmd with
   | None -> ()
-  | Some message -> ignore (Home.dispatch message)
+  | Some message -> ignore (dispatch message)
 
 let response ?(body = "") meth target =
   match (meth, target) with
-  | `GET, "/" -> (`OK, document (Atomic.get Home.state), "application/json")
+  | `GET, "/" -> (`OK, document (Atomic.get state), "application/json")
+  | `GET, target -> (
+      match screenshot_serial target with
+      | Some serial -> screenshot_response serial
+      | None -> (`Not_found, "Not Found", "text/plain"))
   | `POST, "/" -> (
-      match Home.decode body with
+      match decode body with
       | Error message -> (`Bad_request, message, "text/plain")
       | Ok message -> (
-          let state, cmd = Home.step message in
+          let state, cmd = step message in
           match cmd with
           | Components.Cmd.Empty -> (`OK, document state, "application/json")
           | Components.Cmd.Run _ ->
@@ -41,21 +140,32 @@ let stream_headers =
       ("content-type", "application/x-ndjson"); ("transfer-encoding", "chunked");
     ]
 
+let screenshot_headers body =
+  Httpun.Headers.of_list
+    [
+      ("content-length", string_of_int (String.length body));
+      ("content-type", "image/png");
+      ("cache-control", "no-store");
+    ]
+
 let respond ~domain_mgr { Gluten.reqd; _ } =
   let request = Httpun.Reqd.request reqd in
-  let reply (status, body, content_type) =
+  let reply ?headers (status, body, content_type) =
     let headers =
-      Httpun.Headers.of_list
-        [
-          ("content-length", string_of_int (String.length body));
-          ("content-type", content_type);
-        ]
+      Option.value
+        ~default:
+          (Httpun.Headers.of_list
+             [
+               ("content-length", string_of_int (String.length body));
+               ("content-type", content_type);
+             ])
+        headers
     in
     Httpun.Reqd.respond_with_string reqd
       (Httpun.Response.create ~headers status)
       body
   in
-  let stream { Home.cwd; prompt } =
+  let stream { cwd; prompt } =
     let writer =
       Httpun.Reqd.respond_with_streaming ~flush_headers_immediately:true reqd
         (Httpun.Response.create ~headers:stream_headers `OK)
@@ -82,10 +192,10 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
     let rec consumer () =
       match Eio.Stream.take updates with
       | `Delta delta ->
-          write (Home.stream_output delta);
+          write (stream_output delta);
           consumer ()
       | `Done -> ()
-      | `Error error -> write (Home.stream_error error)
+      | `Error error -> write (stream_error error)
     in
     Eio.Fiber.both producer consumer;
     Httpun.Body.Writer.close writer
@@ -106,7 +216,7 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
       match Components.Cmd.run cmd with
       | None -> ()
       | Some message ->
-          let state, next = Home.step message in
+          let state, next = step message in
           write state;
           run next
     in
@@ -120,17 +230,30 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
       (Httpun.Reqd.request_body reqd)
       ~on_eof:(fun () ->
         let body = Buffer.contents body in
-        match Home.start_claude_stream body with
+        match start_claude_stream body with
         | Some request -> stream request
         | None -> (
             match (request.meth, request.target) with
             | `GET, "/" ->
-                reply (`OK, document (Atomic.get Home.state), "application/json")
+                reply (`OK, document (Atomic.get state), "application/json")
+            | `GET, target -> (
+                match screenshot_serial target with
+                | Some serial -> (
+                    let response =
+                      Eio.Domain_manager.run domain_mgr (fun () ->
+                          Runtime.with_unix_process (fun () ->
+                              screenshot_response serial))
+                    in
+                    match response with
+                    | `OK, body, _ ->
+                        reply ~headers:(screenshot_headers body) response
+                    | _ -> reply response)
+                | None -> reply (`Not_found, "Not Found", "text/plain"))
             | `POST, "/" -> (
-                match Home.decode body with
+                match decode body with
                 | Error message -> reply (`Bad_request, message, "text/plain")
                 | Ok message -> (
-                    let state, cmd = Home.step message in
+                    let state, cmd = step message in
                     match cmd with
                     | Components.Cmd.Empty ->
                         reply (`OK, document state, "application/json")

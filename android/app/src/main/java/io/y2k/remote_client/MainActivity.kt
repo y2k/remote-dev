@@ -2,6 +2,7 @@ package io.y2k.remote_client
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -30,11 +31,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import io.ktor.client.HttpClient
+import io.ktor.client.call.body
 import io.ktor.client.engine.android.Android
+import io.ktor.client.request.get
 import io.ktor.client.request.prepareGet
 import io.ktor.client.request.preparePost
 import io.ktor.client.request.setBody
@@ -51,7 +56,10 @@ import org.json.JSONObject
 sealed interface UiNode {
     data class Column(val children: List<UiNode>) : UiNode
 
-    data class Row(val children: List<UiNode>) : UiNode
+    data class Row(
+        val children: List<UiNode>,
+        val weights: List<Float>? = null,
+    ) : UiNode
 
     data class Text(val text: String) : UiNode
 
@@ -66,6 +74,11 @@ sealed interface UiNode {
         val label: String,
         val event: UiEvent,
         val text: String = "",
+    ) : UiNode
+
+    data class Image(
+        val src: String,
+        val label: String,
     ) : UiNode
 }
 
@@ -88,7 +101,31 @@ private fun parseUiNode(node: JSONObject): UiNode {
                             ?: throw IllegalArgumentException("$type child must be an object")
                     parseUiNode(child)
                 }
-            if (type == "column") UiNode.Column(parsedChildren) else UiNode.Row(parsedChildren)
+            if (type == "column") {
+                UiNode.Column(parsedChildren)
+            } else {
+                val weights =
+                    if (node.has("weights")) {
+                        val values =
+                            node.get("weights") as? JSONArray
+                                ?: throw IllegalArgumentException("Row weights must be an array")
+                        if (values.length() != parsedChildren.size) {
+                            throw IllegalArgumentException("Row weights must match children")
+                        }
+                        List(values.length()) { index ->
+                            val weight =
+                                (values.get(index) as? Number)?.toFloat()
+                                    ?: throw IllegalArgumentException("Row weight must be a number")
+                            if (!weight.isFinite() || weight <= 0f) {
+                                throw IllegalArgumentException("Row weight must be positive")
+                            }
+                            weight
+                        }
+                    } else {
+                        null
+                    }
+                UiNode.Row(parsedChildren, weights)
+            }
         }
         "text" ->
             UiNode.Text(
@@ -120,6 +157,19 @@ private fun parseUiNode(node: JSONObject): UiNode {
                     ""
                 },
             )
+        "image" -> {
+            val src =
+                node.get("src") as? String
+                    ?: throw IllegalArgumentException("Image src must be a string")
+            if (!src.startsWith("/") || src.startsWith("//")) {
+                throw IllegalArgumentException("Image src must be backend-relative")
+            }
+            UiNode.Image(
+                src,
+                node.get("label") as? String
+                    ?: throw IllegalArgumentException("Image label must be a string"),
+            )
+        }
         else -> throw IllegalArgumentException("Unsupported node type: $type")
     }
 }
@@ -136,6 +186,11 @@ fun eventRequest(event: UiEvent, value: String?): String =
         .put("event", JSONArray(event.json))
         .put("value", value ?: JSONObject.NULL)
         .toString()
+
+fun decodePng(bytes: ByteArray): ImageBitmap =
+    (BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            ?: throw IllegalArgumentException("Unable to decode image"))
+        .asImageBitmap()
 
 class MainActivity : ComponentActivity() {
     private val client = HttpClient(Android)
@@ -225,6 +280,9 @@ private fun App(client: HttpClient) {
         }
     }
 
+    suspend fun loadImage(src: String): ImageBitmap =
+        decodePng(client.get(BuildConfig.BACKEND_URL.removeSuffix("/") + src).body())
+
     fun sendEvent(event: UiEvent, value: String?, refreshing: Boolean = false) {
         sendRequest(refreshing) {
             client
@@ -284,6 +342,7 @@ private fun App(client: HttpClient) {
                                 onButtonEvent = { event -> sendEvent(event, null) },
                                 onInputEvent = { event, value -> sendEvent(event, value) },
                                 eventInProgress = eventInProgress,
+                                loadImage = ::loadImage,
                             )
                             eventError?.let { Text("Error: $it") }
                         }

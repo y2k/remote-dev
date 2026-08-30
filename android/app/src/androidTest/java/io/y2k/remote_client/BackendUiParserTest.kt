@@ -1,18 +1,22 @@
 package io.y2k.remote_client
 
+import android.graphics.Bitmap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import java.io.ByteArrayOutputStream
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -61,6 +65,18 @@ class BackendUiParserTest {
             UiNode.Input("Input", UiEvent("[\"Input\"]"), "draft"),
             parseUiNode("""{"@type":"input","label":"Input","event":["Input"],"text":"draft"}"""),
         )
+        assertEquals(
+            UiNode.Row(listOf(UiNode.Text("Left"), UiNode.Text("Right")), listOf(2f, 1f)),
+            parseUiNode(
+                """{"@type":"row","children":[{"@type":"text","text":"Left"},{"@type":"text","text":"Right"}],"weights":[2,1]}"""
+            ),
+        )
+        assertEquals(
+            UiNode.Image("/emulators/emulator-5554/screenshot.png", "Pixel"),
+            parseUiNode(
+                """{"@type":"image","src":"/emulators/emulator-5554/screenshot.png","label":"Pixel"}"""
+            ),
+        )
 
         listOf(
                 """{"@type":"text"}""",
@@ -68,12 +84,21 @@ class BackendUiParserTest {
                 """{"@type":"row"}""",
                 """{"@type":"row","children":{}}""",
                 """{"@type":"row","children":["bad"]}""",
+                """{"@type":"row","children":[],"weights":{}}""",
+                """{"@type":"row","children":[{"@type":"text","text":"Left"},{"@type":"text","text":"Right"}],"weights":[1]}""",
+                """{"@type":"row","children":[{"@type":"text","text":"Left"},{"@type":"text","text":"Right"}],"weights":[1,"bad"]}""",
+                """{"@type":"row","children":[{"@type":"text","text":"Left"},{"@type":"text","text":"Right"}],"weights":[1,0]}""",
                 """{"@type":"button","label":"Event","event":"not-an-object"}""",
                 """{"@type":"input","event":{"type":"input"}}""",
                 """{"@type":"input","label":1,"event":{"type":"input"}}""",
                 """{"@type":"input","label":"Input"}""",
                 """{"@type":"input","label":"Input","event":"not-an-object"}""",
                 """{"@type":"input","label":"Input","event":{"type":"input"},"text":1}""",
+                """{"@type":"image","label":"Pixel"}""",
+                """{"@type":"image","src":1,"label":"Pixel"}""",
+                """{"@type":"image","src":"https://example.com/screenshot.png","label":"Pixel"}""",
+                """{"@type":"image","src":"//example.com/screenshot.png","label":"Pixel"}""",
+                """{"@type":"image","src":"/emulators/5554.png","label":1}""",
             )
             .forEach { json ->
                 try {
@@ -254,5 +279,90 @@ class BackendUiParserTest {
         }
 
         composeRule.onNodeWithTag("input").assertTextContains("returned")
+    }
+
+    @Test
+    fun decodesPng() {
+        val bytes =
+            ByteArrayOutputStream().use { output ->
+                Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+                    .compress(
+                        Bitmap.CompressFormat.PNG,
+                        100,
+                        output,
+                    )
+                output.toByteArray()
+            }
+
+        assertEquals(1, decodePng(bytes).width)
+    }
+
+    @Test
+    fun imageRendersAndKeepsSurroundingContentOnFailure() {
+        composeRule.setContent {
+            UiNodeContent(
+                UiNode.Column(
+                    listOf(
+                        UiNode.Text("Still here"),
+                        UiNode.Image("/emulators/emulator-5554/screenshot.png", "Pixel"),
+                    )
+                ),
+                {},
+                { _, _ -> },
+                false,
+                loadImage = { throw IllegalStateException("unavailable") },
+            )
+        }
+
+        composeRule.onNodeWithText("Still here").assertTextContains("Still here")
+        composeRule.onNodeWithText("Error: Pixel").assertTextContains("Error: Pixel")
+    }
+
+    @Test
+    fun weightedRowUsesProportionalWidths() {
+        composeRule.setContent {
+            UiNodeContent(
+                UiNode.Row(
+                    listOf(UiNode.Image("/left.png", "Left"), UiNode.Image("/right.png", "Right")),
+                    listOf(2f, 1f),
+                ),
+                {},
+                { _, _ -> },
+                false,
+                loadImage = { ImageBitmap(1, 1) },
+            )
+        }
+
+        val left =
+            composeRule.onNodeWithContentDescription("Left").fetchSemanticsNode().boundsInRoot.width
+        val right =
+            composeRule
+                .onNodeWithContentDescription("Right")
+                .fetchSemanticsNode()
+                .boundsInRoot
+                .width
+        assertEquals(2f, left / right, 0.01f)
+    }
+
+    @Test
+    fun imageRefreshesWithoutSubmittingAnEvent() {
+        var requests = 0
+        var events = 0
+        composeRule.setContent {
+            UiNodeContent(
+                UiNode.Image("/emulators/emulator-5554/screenshot.png", "Pixel"),
+                { events++ },
+                { _, _ -> events++ },
+                false,
+                loadImage = {
+                    requests++
+                    ImageBitmap(1, 1)
+                },
+            )
+        }
+
+        composeRule.onNodeWithTag("image").fetchSemanticsNode()
+        composeRule.waitUntil(4_000) { requests >= 2 }
+        assertEquals(0, events)
     }
 }
