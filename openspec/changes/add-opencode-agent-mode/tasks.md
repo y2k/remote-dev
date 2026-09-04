@@ -5,7 +5,7 @@
 
 ## 2. Session-Aware Prompt Dispatch
 
-- [ ] 2.1 Replace the Claude-specific prompt message with the handler-based generic prompt message from `dispatch-input-handlers`, add the hidden optional session ID to selected-worktree state, preserve it while clearing the previous response, and verify first, continued, failed, and Back-reset transitions.
+- [ ] 2.1 Replace the Claude-specific prompt message with a handler-based generic prompt message, add the hidden optional session ID to selected-worktree state, preserve it while clearing the previous response, and verify first, continued, failed, and Back-reset transitions.
 - [ ] 2.2 Generalize the server prompt stream request to capture the startup agent and current session ID, apply session-ID updates without emitting duplicate UI documents, and verify ordinary execution failures remain UI errors while fatal protocol exceptions escape and terminate the backend path.
 
 ## 3. CLI Process Protocols

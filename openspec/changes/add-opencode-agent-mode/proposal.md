@@ -29,4 +29,3 @@ Backend сейчас всегда запускает Claude CLI, поэтому 
 - Затрагиваются startup parsing, неизменяемое окружение `Home`, backend-defined view, server streaming dispatch, runtime process adapters, OCaml tests и README.
 - Android production-код и HTTP envelope не меняются; клиент продолжает отображать полные JSON/NDJSON UI-документы и пересылать opaque events.
 - Для режима OpenCode требуется локальный `opencode` версии 1.18.20 или новее; runtime version check и CLI availability preflight не добавляются.
-- Реализация change должна выполняться после `dispatch-input-handlers`, поскольку оба change затрагивают command input и server dispatch.

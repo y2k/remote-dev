@@ -2,7 +2,7 @@
 
 См. `proposal.md` и delta spec. Сейчас `Emulator` уже является самостоятельным TEA-компонентом, но `Worktree.model` владеет его model, `Worktree.msg` поднимает его messages, `Worktree.enter` запускает загрузку, а `Worktree.view` создаёт weighted row `[2, 1]`.
 
-Корневой `Home` владеет только текущим `screen`; его `view` выбирает один page view, а переходы создают новую page model. `Cmd` представляет не более одной команды, но `Server.initialize` и dispatch уже рекурсивно выполняют цепочку commands до завершения. Активный change `dispatch-input-handlers` также планирует изменить `Home.state`, сериализацию view и input dispatch.
+Корневой `Home` владеет только текущим `screen`; его `view` выбирает один page view, а переходы создают новую page model. `Cmd` представляет не более одной команды, но `Server.initialize` и dispatch уже рекурсивно выполняют цепочку commands до завершения.
 
 ## Goals / Non-Goals
 
@@ -58,12 +58,11 @@ Android-проверки не меняются: клиент уже рекурс
 - [Последовательная начальная загрузка немного увеличивает startup time] -> Обе локальные команды и сейчас выполняются до полезной работы; не добавлять command concurrency без измеренной задержки.
 - [Ошибка загрузки эмуляторов может помешать запуску загрузки worktree] -> Bootstrap обрабатывает и `Ok`, и `Error`, сохраняет emulator error и в обоих случаях возвращает `Worktrees.enter` command.
 - [Навигационный переход случайно пересоздаст root state] -> Строить переходы через сохранение текущего `emulator` и проверить выбор устройства до и после каждого типа навигации.
-- [Активный `dispatch-input-handlers` меняет те же `Home.state`, view и тесты] -> Реализовать этот change первым, затем адаптировать `dispatch-input-handlers` к root emulator field и не возвращать прежнюю worktree ownership.
 - [Старые emulator button events содержат дополнительный `Worktree_msg` wrapper] -> UI публикует новые прямые root events; Android не хранит события после замены документа и трактует их непрозрачно.
 
 ## Migration Plan
 
-1. Реализовать этот change до `dispatch-input-handlers`, перенести emulator ownership и startup command chain в `Home`.
+1. Перенести emulator ownership и startup command chain в `Home`.
 2. Удалить emulator composition из `Worktree` и обновить root/page проверки.
 3. Обновить README, выполнить `dune fmt` и `dune test`.
 4. Выпустить только backend: Android protocol не меняется. Для rollback вернуть emulator model и routing в `Worktree`; сохранённых данных и миграций нет.

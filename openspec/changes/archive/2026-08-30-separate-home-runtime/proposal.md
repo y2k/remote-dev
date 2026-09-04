@@ -24,4 +24,3 @@ Compilation unit `Home` одновременно представляет кор
 
 - Затрагиваются `lib/home.ml`, `lib/server.ml` и OCaml-проверки в `test/test_remote_dev.ml`.
 - Новые зависимости, HTTP routes, форматы SDUI nodes, Android-код и runtime operations не требуются.
-- Активный change `dispatch-input-handlers` должен после этого считать revision и atomic selector dispatch ответственностью server session, а не `Home.model`; его planning artifacts не входят в scope этого change.

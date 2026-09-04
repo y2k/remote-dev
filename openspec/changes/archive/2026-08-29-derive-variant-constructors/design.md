@@ -17,7 +17,6 @@
 - Не менять variant constructors, JSON representation, view, update или command semantics.
 - Не добавлять `[@@deriving variants]` ко всем variant types.
 - Не вводить `.mli` только для сокрытия сгенерированного API.
-- Не связывать изменение с незавершённым `dispatch-input-handlers`; его новые input builders могут использовать generated functions отдельно, когда появятся в коде.
 
 ## Decisions
 

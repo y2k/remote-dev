@@ -2,8 +2,6 @@
 
 См. `proposal.md` и delta specs. Сейчас путь repository читается из `Sys.argv` внутри `Worktrees`, `Run_claude` напрямую определяет streaming route, а `Runtime.stream_claude` извлекает только Claude text deltas. Модель выбранного worktree не хранит CLI session ID. OpenCode 1.18.20 предоставляет `run --dir <path> --format json`, печатает completed text parts и session ID, поддерживает явный `--session`, command mode и `--auto`.
 
-Активный change `dispatch-input-handlers` меняет тот же command input и server decoder. Этот change проектируется поверх его handler-based input API и не должен реализовываться раньше него.
-
 ## Goals / Non-Goals
 
 **Goals:**
@@ -74,8 +72,7 @@ Runtime checks используют существующий effect-based fake p
 
 ## Migration Plan
 
-1. Сначала реализовать и архивировать `dispatch-input-handlers`.
-2. Добавить startup parser/environment, conditional UI и generic prompt message, сохраняя Claude mode работоспособным.
-3. Добавить session protocol для Claude, затем OpenCode parser/invocation и fake-process checks.
-4. Обновить README и запускать backend только с явным `--agent`.
-5. Для rollback вернуть предыдущую версию backend и убрать `--agent` из startup command; сохранённые CLI sessions и Git worktrees не требуют миграции.
+1. Добавить startup parser/environment, conditional UI и generic prompt message, сохраняя Claude mode работоспособным.
+2. Добавить session protocol для Claude, затем OpenCode parser/invocation и fake-process checks.
+3. Обновить README и запускать backend только с явным `--agent`.
+4. Для rollback вернуть предыдущую версию backend и убрать `--agent` из startup command; сохранённые CLI sessions и Git worktrees не требуют миграции.

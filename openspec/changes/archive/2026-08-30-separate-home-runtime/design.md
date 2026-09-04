@@ -2,7 +2,7 @@
 
 См. `proposal.md` для мотивации. Сейчас `lib/home.ml` содержит два слоя: вложенный `module Home` с корневым TEA state/message/view/update и окружающие его функции для HTTP envelope, JSON, глобального `Atomic`-состояния, command dispatch и Claude streaming. `Server` уже владеет HTTP routes, Eio fibers, response writers и выполнением `Runtime`, но вызывает runtime helpers из внешнего `Home`, поэтому публичные пути компонента имеют форму `Home.Home.*`.
 
-Текущий `Components.Cmd` хранит не более одной отложенной команды, а `Server.initialize`, обычный UI streaming и Claude streaming применяют возвращаемые messages к одному глобальному UI-сеансу. Активный change `dispatch-input-handlers` ещё не реализован и планирует добавить revision-aware atomic dispatch поверх этого состояния.
+Текущий `Components.Cmd` хранит не более одной отложенной команды, а `Server.initialize`, обычный UI streaming и Claude streaming применяют возвращаемые messages к одному глобальному UI-сеансу.
 
 ## Goals / Non-Goals
 
@@ -11,7 +11,7 @@
 - Сделать compilation unit `Home` корневым TEA-компонентом той же формы, что модули в `Home_components`: `model`, `msg`, `init`, `view`, `update`.
 - Сосредоточить владение изменяемым UI-сеансом и transport/runtime orchestration в `Server`.
 - Сохранить текущую последовательность state transitions, команд и streaming documents.
-- Оставить подходящую границу для будущего server-owned `{ revision; home }` из `dispatch-input-handlers`.
+- Оставить подходящую границу для server-owned `{ revision; home }`.
 
 **Non-Goals:**
 
@@ -19,7 +19,6 @@
 - Не удалять вызовы `Runtime` и `Sys.argv` из `Home_components`.
 - Не менять JSON-представление `Home.msg`, UI-документов или request envelope.
 - Не объединять синхронный `Server.response` и Eio request handler и не менять Claude process streaming.
-- Не обновлять planning artifacts активного `dispatch-input-handlers` в рамках этого change.
 
 ## Decisions
 
@@ -33,7 +32,7 @@
 
 Глобальный `Atomic` переносится в `Server` и хранит `Home.model`. Server-private `step` применяет `Home.update` и фиксирует новую модель; `dispatch` выполняет существующую цепочку `Cmd.run` до `Cmd.none`. `initialize`, синхронный `response` и Eio handler используют это состояние напрямую.
 
-Не вводится новый `App`, `Session` или `Home_runtime` module: единственный потребитель этой обвязки уже `Server`, а дополнительный compilation unit только перенесёт те же функции без новой границы поведения. Когда `dispatch-input-handlers` добавит revision, `Server` сможет заменить значение atomic на `{ revision; home : Home.model }`, не меняя component model.
+Не вводится новый `App`, `Session` или `Home_runtime` module: единственный потребитель этой обвязки уже `Server`, а дополнительный compilation unit только перенесёт те же функции без новой границы поведения. `Server` сможет заменить значение atomic на `{ revision; home : Home.model }`, не меняя component model.
 
 ### HTTP и JSON преобразования остаются на серверной границе
 
@@ -58,7 +57,6 @@
 - [Механический перенос случайно меняет JSON events или документы] -> Сохранить определения `msg` и тела `view`/`update`, затем выполнить существующие equality и round-trip проверки.
 - [Синхронный и Eio server paths расходятся после переноса] -> Оба пути должны использовать одни server-owned decode, step и document helpers; не рефакторить сами HTTP handlers сверх необходимой замены вызовов.
 - [Server сильнее знает внутренние варианты `Home` для Claude streaming] -> Это уже существующая специальная связь; локализовать её в server streaming path и не расширять component API вспомогательным stream abstraction.
-- [Активный `dispatch-input-handlers` ссылается на старые `Home.state` и `Home.decode`] -> Реализовать этот change первым, затем отдельно обновить его design/tasks под server-owned session до apply.
 - [Внешний OCaml-код мог использовать прежние `Home.Home.*` или runtime helpers] -> Проект не объявляет стабильный OCaml library API; обновить все repository callers и не добавлять compatibility aliases.
 
 ## Migration Plan
