@@ -35,19 +35,45 @@ let with_emulator_processes f =
         argv = [| "adb"; "-s"; "emulator-5554"; "exec-out"; "screencap"; "-p" |]);
       Effect.Deep.continue k ("\137PNG", Unix.WEXITED 0)
 
-let check_claude cwd prompt = function
+let check_claude ?session cwd prompt = function
   | Remote_dev.Runtime.Args ("/bin/sh", argv) ->
-      assert (
-        argv
-        = [|
-            "/bin/sh";
-            "-c";
-            "cd \"$1\" && exec claude --print --output-format stream-json \
-             --verbose --include-partial-messages -- \"$2\"";
-            "sh";
-            cwd;
-            prompt;
-          |])
+      let expected =
+        match session with
+        | None ->
+            [|
+              "/bin/sh";
+              "-c";
+              "cd \"$1\" && exec claude --print --output-format stream-json \
+               --verbose --include-partial-messages -- \"$2\"";
+              "sh";
+              cwd;
+              prompt;
+            |]
+        | Some session ->
+            [|
+              "/bin/sh";
+              "-c";
+              "cd \"$1\" && exec claude --print --output-format stream-json \
+               --verbose --include-partial-messages --resume \"$2\" -- \"$3\"";
+              "sh";
+              cwd;
+              session;
+              prompt;
+            |]
+      in
+      assert (argv = expected)
+  | Remote_dev.Runtime.Shell _ | Remote_dev.Runtime.Args _ -> assert false
+
+let check_opencode ?session expected_input cwd = function
+  | Remote_dev.Runtime.Args ("opencode", argv) ->
+      let expected =
+        [ "opencode"; "run"; "--dir"; cwd; "--format"; "json"; "--auto" ]
+        @
+        match session with
+        | Some session -> [ "--session"; session ] @ expected_input
+        | None -> expected_input
+      in
+      assert (Array.to_list argv = expected)
   | Remote_dev.Runtime.Shell _ | Remote_dev.Runtime.Args _ -> assert false
 
 let check_create_worktree root name = function
@@ -70,43 +96,274 @@ let claude_delta text =
   "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\""
   ^ text ^ "\"}}}"
 
+let claude_init session_id =
+  "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"" ^ session_id
+  ^ "\"}"
+
+let opencode_text session_id text =
+  "{\"type\":\"text\",\"sessionID\":\"" ^ session_id
+  ^ "\",\"part\":{\"type\":\"text\",\"text\":\"" ^ text ^ "\"}}"
+
+let protocol_failure f =
+  try
+    f ();
+    false
+  with Remote_dev.Runtime.Protocol_error _ -> true
+
+let has_usage message =
+  message |> String.split_on_char '\n'
+  |> List.exists (String.starts_with ~prefix:"Usage:")
+
 let () =
+  let claude =
+    Remote_dev.Runtime.parse_args [| "remote_dev"; "--agent"; "claude" |]
+  in
+  assert (claude.agent = Remote_dev.Runtime.Claude);
+  assert (claude.root = Sys.getcwd ());
+  let opencode =
+    Remote_dev.Runtime.parse_args
+      [| "remote_dev"; "--agent"; "opencode"; "/tmp/repository" |]
+  in
+  assert (opencode.agent = Remote_dev.Runtime.OpenCode);
+  assert (opencode.root = "/tmp/repository");
+  assert (
+    try
+      ignore (Remote_dev.Runtime.parse_args [| "remote_dev" |]);
+      false
+    with Arg.Bad message -> has_usage message);
+  assert (
+    try
+      ignore
+        (Remote_dev.Runtime.parse_args [| "remote_dev"; "--agent"; "Claude" |]);
+      false
+    with Arg.Bad message -> has_usage message);
+  assert (
+    try
+      ignore
+        (Remote_dev.Runtime.parse_args
+           [| "remote_dev"; "--agent"; "claude"; "--agent"; "opencode" |]);
+      false
+    with Arg.Bad _ -> true);
   let worktree = "worktree ; $literal" in
   let prompt = "-prompt with spaces; $(literal) \"quoted\"" in
-  let output = ref [] in
+  let events = ref [] in
   with_process
     ~check:(check_claude worktree prompt)
     [
-      "{\"type\":\"system\",\"subtype\":\"init\"}";
+      claude_init "claude-session";
       claude_delta "Hel";
       claude_delta "lo";
       "{\"type\":\"result\",\"result\":\"Hello\"}";
     ]
     (Unix.WEXITED 0)
     (fun () ->
-      Remote_dev.Runtime.stream_claude worktree prompt (fun delta ->
-          output := delta :: !output));
-  assert (List.rev !output = [ "Hel"; "lo" ]);
-  let failed_output = ref [] in
+      Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.Claude ~cwd:worktree
+        ~prompt ~session_id:None (fun event -> events := event :: !events));
+  assert (
+    List.rev !events
+    = [
+        Remote_dev.Runtime.Session "claude-session";
+        Remote_dev.Runtime.Text "Hel";
+        Remote_dev.Runtime.Text "lo";
+      ]);
+  let resumed = ref [] in
+  with_process
+    ~check:(check_claude ~session:"claude-session" worktree "continue")
+    [ claude_init "claude-session"; claude_delta "Again" ]
+    (Unix.WEXITED 0)
+    (fun () ->
+      Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.Claude ~cwd:worktree
+        ~prompt:"continue" ~session_id:(Some "claude-session") (fun event ->
+          resumed := event :: !resumed));
+  assert (
+    List.rev !resumed
+    = [
+        Remote_dev.Runtime.Session "claude-session";
+        Remote_dev.Runtime.Text "Again";
+      ]);
+  let failed_events = ref [] in
   assert (
     try
       with_process
         ~check:(check_claude worktree "--fail")
-        [ claude_delta "Hel" ]
+        [ claude_init "failed-session"; claude_delta "Hel" ]
         (Unix.WEXITED 1)
         (fun () ->
-          Remote_dev.Runtime.stream_claude worktree "--fail" (fun delta ->
-              failed_output := delta :: !failed_output));
+          Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.Claude
+            ~cwd:worktree ~prompt:"--fail" ~session_id:None (fun event ->
+              failed_events := event :: !failed_events));
       false
     with Failure _ -> true);
-  assert (List.rev !failed_output = [ "Hel" ]);
+  assert (
+    List.rev !failed_events
+    = [
+        Remote_dev.Runtime.Session "failed-session";
+        Remote_dev.Runtime.Text "Hel";
+      ]);
+  assert (
+    protocol_failure (fun () ->
+        with_process ~check:(check_claude worktree "--bad-json")
+          [ "{bad json}" ] (Unix.WEXITED 0) (fun () ->
+            Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.Claude
+              ~cwd:worktree ~prompt:"--bad-json" ~session_id:None (fun _ -> ()))));
+  assert (
+    protocol_failure (fun () ->
+        with_process
+          ~check:(check_claude worktree "missing-session")
+          [ claude_delta "text" ]
+          (Unix.WEXITED 0)
+          (fun () ->
+            Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.Claude
+              ~cwd:worktree ~prompt:"missing-session" ~session_id:None (fun _ ->
+                ()))));
+  assert (
+    protocol_failure (fun () ->
+        with_process
+          ~check:(check_claude ~session:"expected" worktree "mismatch")
+          [ claude_init "different" ]
+          (Unix.WEXITED 0)
+          (fun () ->
+            Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.Claude
+              ~cwd:worktree ~prompt:"mismatch" ~session_id:(Some "expected")
+              (fun _ -> ()))));
+  assert (
+    protocol_failure (fun () ->
+        with_process
+          ~check:(check_claude worktree "conflict")
+          [
+            claude_init "first";
+            "{\"type\":\"result\",\"session_id\":\"second\"}";
+          ]
+          (Unix.WEXITED 0)
+          (fun () ->
+            Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.Claude
+              ~cwd:worktree ~prompt:"conflict" ~session_id:None (fun _ -> ()))));
+  let opencode_prompt = "  -prompt  with $(literal) \"quoted value\" \tend  " in
+  let opencode_events = ref [] in
+  with_process
+    ~check:
+      (check_opencode
+         [
+           "--";
+           "";
+           "";
+           "-prompt";
+           "";
+           "with";
+           "$(literal)";
+           "\"quoted";
+           "value\"";
+           "\tend";
+           "";
+           "";
+         ]
+         worktree)
+    [
+      "{\"type\":\"step_start\",\"sessionID\":\"open-session\"}";
+      opencode_text "open-session" "Hello";
+      opencode_text "open-session" " world";
+      "{\"type\":\"unknown\",\"sessionID\":\"open-session\"}";
+    ]
+    (Unix.WEXITED 0)
+    (fun () ->
+      Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.OpenCode ~cwd:worktree
+        ~prompt:opencode_prompt ~session_id:None (fun event ->
+          opencode_events := event :: !opencode_events));
+  assert (
+    List.rev !opencode_events
+    = [
+        Remote_dev.Runtime.Session "open-session";
+        Remote_dev.Runtime.Text "Hello";
+        Remote_dev.Runtime.Text " world";
+      ]);
+  with_process
+    ~check:
+      (check_opencode ~session:"open-session" [ "--"; "continue" ] worktree)
+    [ opencode_text "open-session" "continued" ]
+    (Unix.WEXITED 0)
+    (fun () ->
+      Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.OpenCode ~cwd:worktree
+        ~prompt:"continue" ~session_id:(Some "open-session") (fun _ -> ()));
+  with_process
+    ~check:(check_opencode [ "--"; "/" ] worktree)
+    [ opencode_text "slash-session" "slash" ]
+    (Unix.WEXITED 0)
+    (fun () ->
+      Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.OpenCode ~cwd:worktree
+        ~prompt:"/" ~session_id:None (fun _ -> ()));
+  with_process
+    ~check:
+      (check_opencode
+         [ "--command"; "review"; "--"; "main"; "branch" ]
+         worktree)
+    [ opencode_text "command-session" "review" ]
+    (Unix.WEXITED 0)
+    (fun () ->
+      Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.OpenCode ~cwd:worktree
+        ~prompt:" \t/review  main branch \n" ~session_id:None (fun _ -> ()));
+  with_process
+    ~check:(check_opencode [ "--"; "/"; "review" ] worktree)
+    [ opencode_text "spaced-slash-session" "prompt" ]
+    (Unix.WEXITED 0)
+    (fun () ->
+      Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.OpenCode ~cwd:worktree
+        ~prompt:"/ review" ~session_id:None (fun _ -> ()));
+  let command_processes = ref 0 in
   assert (
     try
-      with_process ~check:(check_claude worktree "--bad-json")
-        [ "{bad json}" ] (Unix.WEXITED 0) (fun () ->
-          Remote_dev.Runtime.stream_claude worktree "--bad-json" (fun _ -> ()));
+      with_process
+        ~check:(fun process ->
+          incr command_processes;
+          check_opencode [ "--command"; "missing" ] worktree process)
+        [ "{\"type\":\"error\",\"sessionID\":\"command-session\"}" ]
+        (Unix.WEXITED 1)
+        (fun () ->
+          Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.OpenCode
+            ~cwd:worktree ~prompt:"/missing" ~session_id:None (fun _ -> ()));
       false
-    with Yojson.Json_error _ -> true);
+    with Failure _ -> true);
+  assert (!command_processes = 1);
+  assert (
+    try
+      with_process
+        ~check:(check_opencode [ "--"; "failed" ] worktree)
+        [ opencode_text "failed-session" "partial" ]
+        (Unix.WSIGNALED Sys.sigterm)
+        (fun () ->
+          Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.OpenCode
+            ~cwd:worktree ~prompt:"failed" ~session_id:None (fun _ -> ()));
+      false
+    with
+    | Failure message -> message = "opencode failed"
+    | _ -> false);
+  assert (
+    protocol_failure (fun () ->
+        with_process
+          ~check:(check_opencode [ "--"; "bad" ] worktree)
+          [ "not-json" ] (Unix.WEXITED 0)
+          (fun () ->
+            Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.OpenCode
+              ~cwd:worktree ~prompt:"bad" ~session_id:None (fun _ -> ()))));
+  assert (
+    protocol_failure (fun () ->
+        with_process
+          ~check:(check_opencode [ "--"; "missing" ] worktree)
+          [ "{\"type\":\"unknown\"}" ]
+          (Unix.WEXITED 0)
+          (fun () ->
+            Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.OpenCode
+              ~cwd:worktree ~prompt:"missing" ~session_id:None (fun _ -> ()))));
+  assert (
+    protocol_failure (fun () ->
+        with_process
+          ~check:
+            (check_opencode ~session:"expected" [ "--"; "mismatch" ] worktree)
+          [ opencode_text "different" "text" ]
+          (Unix.WEXITED 0)
+          (fun () ->
+            Remote_dev.Runtime.stream_prompt Remote_dev.Runtime.OpenCode
+              ~cwd:worktree ~prompt:"mismatch" ~session_id:(Some "expected")
+              (fun _ -> ()))));
   let root = "/tmp/remote-dev" in
   with_process ~check:(check_create_worktree root "feature/new-worktree")
     [] (Unix.WEXITED 0) (fun () ->

@@ -112,11 +112,11 @@ class BackendUiParserTest {
     fun buildsEventRequestEnvelope() {
         val request =
             JSONObject(
-                eventRequest(UiEvent("[\"Worktree_msg\",[\"Run_claude\",\"__VALUE__\"]]"), "draft")
+                eventRequest(UiEvent("[\"Worktree_msg\",[\"Run_prompt\",\"__VALUE__\"]]"), "draft")
             )
 
         assertEquals(
-            "Run_claude",
+            "Run_prompt",
             request.getJSONArray("event").getJSONArray(1).getString(0),
         )
         assertEquals("draft", request.getString("value"))

@@ -110,38 +110,47 @@ module Worktree = struct
     prompt : string;
     output : string option;
     error : string option;
+    session_id : string option;
   }
 
   type msg =
     | Clear_error
-    | Run_claude of string
+    | Run_prompt of string
     | Set_prompt of string
+    | Session_started of string
     | Output of string
     | Finished of (string, string) result
     | Error of string
   [@@deriving yojson, variants]
 
-  let init path = ({ path; prompt = ""; output = None; error = None }, Cmd.none)
+  let init path =
+    ( { path; prompt = ""; output = None; error = None; session_id = None },
+      Cmd.none )
 
-  let view { path; prompt; output; error } : msg Components.t =
+  let view agent { path; prompt; output; error; session_id = _ } :
+      msg Components.t =
     let messages =
       match output with Some output -> [ text output ] | None -> []
     in
+    let shortcuts =
+      match agent with
+      | Runtime.Claude ->
+          [
+            row
+              [
+                button ~event:(Set_prompt "/igor-pending-reviews")
+                  "/igor-pending-reviews";
+                button ~event:(Set_prompt "/igor-restart-mr-tests")
+                  "/igor-restart-mr-tests";
+              ];
+          ]
+      | Runtime.OpenCode -> []
+    in
     let content =
       column
-        [
-          text "Worktree";
-          row [ text "Path:"; text path ];
-          column messages;
-          row
-            [
-              button ~event:(Set_prompt "/igor-pending-reviews")
-                "/igor-pending-reviews";
-              button ~event:(Set_prompt "/igor-restart-mr-tests")
-                "/igor-restart-mr-tests";
-            ];
-          edit ~text:prompt ~event:(Run_claude "__VALUE__") "Commands";
-        ]
+        ([ text "Worktree"; row [ text "Path:"; text path ]; column messages ]
+        @ shortcuts
+        @ [ edit ~text:prompt ~event:(Run_prompt "__VALUE__") "Commands" ])
     in
     match error with
     | None -> content
@@ -149,9 +158,11 @@ module Worktree = struct
 
   let update model = function
     | Clear_error -> ({ model with error = None }, Cmd.none)
-    | Run_claude prompt ->
+    | Run_prompt prompt ->
         ({ model with prompt; output = None; error = None }, Cmd.none)
     | Set_prompt prompt -> ({ model with prompt; error = None }, Cmd.none)
+    | Session_started session_id ->
+        ({ model with session_id = Some session_id }, Cmd.none)
     | Output output ->
         ( {
             model with
@@ -176,35 +187,34 @@ module Worktrees = struct
     | Error of string
   [@@deriving yojson]
 
-  let view { worktrees; error } : msg Components.t =
+  let view agent { worktrees; error } : msg Components.t =
     let worktrees =
       worktrees
       |> List.map (fun (w : Runtime.worktree) ->
           column [ text w.path; button ~event:(Select w.path) w.branch ])
     in
+    let creation =
+      match agent with
+      | Runtime.Claude -> [ button ~event:Open_creation "New" ]
+      | Runtime.OpenCode -> []
+    in
     let content =
-      column
-        [
-          text "Worktrees:"; button ~event:Open_creation "New"; column worktrees;
-        ]
+      column ([ text "Worktrees:" ] @ creation @ [ column worktrees ])
     in
     match error with
     | None -> content
     | Some error -> column [ text ("Error: " ^ error); content ]
 
-  let root () =
-    if Array.length Sys.argv > 1 then Sys.argv.(1) else Sys.getcwd ()
-
-  let load : msg Cmd.t =
+  let load root : msg Cmd.t =
     Cmd.Run
       (fun () ->
-        try Some (Loaded (Ok (Runtime.load_worktrees (root ()))))
+        try Some (Loaded (Ok (Runtime.load_worktrees root)))
         with exn -> Some (Loaded (Error (Printexc.to_string exn))))
 
-  let init () = ({ worktrees = []; error = None }, load)
+  let init root = ({ worktrees = []; error = None }, load root)
 
-  let update model = function
-    | Load -> ({ model with error = None }, load)
+  let update root model = function
+    | Load -> ({ model with error = None }, load root)
     | Loaded (Ok worktrees) -> ({ worktrees; error = None }, Cmd.none)
     | Loaded (Error error) -> ({ model with error = Some error }, Cmd.none)
     | Select _ | Open_creation -> (model, Cmd.none)

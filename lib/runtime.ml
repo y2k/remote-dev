@@ -1,6 +1,39 @@
 type worktree = { path : string; branch : string } [@@deriving yojson]
 type emulator = { serial : string; name : string } [@@deriving yojson]
 type process = Shell of string | Args of string * string array
+type agent = Claude | OpenCode
+type environment = { agent : agent; root : string }
+type stream_event = Session of string | Text of string
+
+exception Protocol_error of string
+
+let parse_args argv =
+  let agent = ref None and root = ref None in
+  let set_agent value =
+    if Option.is_some !agent then
+      raise (Arg.Bad "--agent specified more than once");
+    agent :=
+      Some
+        (match value with
+        | "claude" -> Claude
+        | "opencode" -> OpenCode
+        | _ -> raise (Arg.Bad "--agent must be claude or opencode"))
+  in
+  let set_root value =
+    match !root with
+    | None -> root := Some value
+    | Some _ -> raise (Arg.Bad "only one repository root is allowed")
+  in
+  let current = ref 0 in
+  let usage = "Usage: remote_dev --agent claude|opencode [repository-root]" in
+  let options =
+    [ ("--agent", Arg.String set_agent, "claude|opencode Coding agent") ]
+  in
+  Arg.parse_argv ~current argv options set_root usage;
+  match !agent with
+  | Some agent -> { agent; root = Option.value ~default:(Sys.getcwd ()) !root }
+  | None ->
+      raise (Arg.Bad ("--agent is required\n" ^ Arg.usage_string options usage))
 
 type _ Effect.t +=
   | Process_lines : (process * (string -> unit)) -> Unix.process_status Effect.t
@@ -143,41 +176,145 @@ let create_worktree (root : string) (name : string) : unit =
   | Unix.WEXITED 0 -> ()
   | _ -> failwith "claude worktree creation failed"
 
-let stream_claude (cwd : string) (prompt : string) on_delta : unit =
-  (* ponytail: shell wrapper provides child-only cwd and inherited stderr; use fork/pipe only if stderr capture is needed. *)
-  let field name fields = List.assoc_opt name fields in
-  let text_delta line =
-    match Yojson.Basic.from_string line with
-    | `Assoc fields -> (
+let field name fields = List.assoc_opt name fields
+
+let json line =
+  try Yojson.Basic.from_string line
+  with Yojson.Json_error _ -> raise (Protocol_error "malformed agent JSON")
+
+let claude_events line =
+  match json line with
+  | `Assoc fields ->
+      let session =
+        match field "session_id" fields with
+        | Some (`String session_id) -> [ Session session_id ]
+        | Some _ -> raise (Protocol_error "invalid Claude session ID")
+        | None -> []
+      in
+      let text =
         match (field "type" fields, field "event" fields) with
         | Some (`String "stream_event"), Some (`Assoc event) -> (
             match (field "type" event, field "delta" event) with
             | Some (`String "content_block_delta"), Some (`Assoc delta) -> (
                 match (field "type" delta, field "text" delta) with
-                | Some (`String "text_delta"), Some (`String text) -> Some text
-                | _ -> None)
-            | _ -> None)
-        | _ -> None)
-    | _ -> None
+                | Some (`String "text_delta"), Some (`String text) ->
+                    [ Text text ]
+                | _ -> [])
+            | _ -> [])
+        | _ -> []
+      in
+      session @ text
+  | _ -> []
+
+let opencode_events line =
+  match json line with
+  | `Assoc fields ->
+      let session =
+        match field "sessionID" fields with
+        | Some (`String session_id) -> [ Session session_id ]
+        | Some _ -> raise (Protocol_error "invalid OpenCode session ID")
+        | None -> []
+      in
+      let text =
+        match (field "type" fields, field "part" fields) with
+        | Some (`String "text"), Some (`Assoc part) -> (
+            match (field "type" part, field "text" part) with
+            | Some (`String "text"), Some (`String text) -> [ Text text ]
+            | _ -> [])
+        | _ -> []
+      in
+      session @ text
+  | _ -> []
+
+let claude_process cwd prompt session_id =
+  let command, arguments =
+    match session_id with
+    | None ->
+        ( "cd \"$1\" && exec claude --print --output-format stream-json \
+           --verbose --include-partial-messages -- \"$2\"",
+          [ cwd; prompt ] )
+    | Some session_id ->
+        ( "cd \"$1\" && exec claude --print --output-format stream-json \
+           --verbose --include-partial-messages --resume \"$2\" -- \"$3\"",
+          [ cwd; session_id; prompt ] )
+  in
+  Args
+    ("/bin/sh", Array.of_list ([ "/bin/sh"; "-c"; command; "sh" ] @ arguments))
+
+let is_space = function ' ' | '\t' | '\n' | '\r' -> true | _ -> false
+
+let opencode_input prompt =
+  let input = String.trim prompt in
+  if String.length input < 2 || input.[0] <> '/' then `Prompt prompt
+  else
+    let rec boundary index =
+      if index = String.length input || is_space input.[index] then index
+      else boundary (index + 1)
+    in
+    let index = boundary 1 in
+    if index = 1 then `Prompt prompt
+    else
+      let command = String.sub input 1 (index - 1) in
+      let arguments =
+        String.sub input index (String.length input - index) |> String.trim
+      in
+      `Command (command, arguments)
+
+(* OpenCode 1.18.20 rejoins argv with spaces and quotes arguments that contain
+   one, so splitting only on spaces preserves the exact original input. *)
+let opencode_message value = "--" :: String.split_on_char ' ' value
+
+let opencode_process cwd prompt session_id =
+  let arguments =
+    [ "opencode"; "run"; "--dir"; cwd; "--format"; "json"; "--auto" ]
+    @
+    match session_id with
+    | Some session_id -> [ "--session"; session_id ]
+    | None -> []
+  in
+  let arguments =
+    arguments
+    @
+    match opencode_input prompt with
+    | `Prompt prompt -> opencode_message prompt
+    | `Command (command, "") -> [ "--command"; command ]
+    | `Command (command, arguments) ->
+        [ "--command"; command ] @ opencode_message arguments
+  in
+  Args ("opencode", Array.of_list arguments)
+
+let stream_prompt agent ~cwd ~prompt ~session_id on_event =
+  let seen_session = ref None in
+  let emit = function
+    | Session id when id = "" -> raise (Protocol_error "empty session ID")
+    | Session id -> (
+        (match session_id with
+        | Some requested when requested <> id ->
+            raise (Protocol_error "resumed session ID changed")
+        | Some _ | None -> ());
+        match !seen_session with
+        | None ->
+            seen_session := Some id;
+            on_event (Session id)
+        | Some previous when previous <> id ->
+            raise (Protocol_error "conflicting session IDs")
+        | Some _ -> ())
+    | Text _ as event -> on_event event
+  in
+  let process, parse, failure =
+    match agent with
+    | Claude ->
+        (claude_process cwd prompt session_id, claude_events, "claude failed")
+    | OpenCode ->
+        ( opencode_process cwd prompt session_id,
+          opencode_events,
+          "opencode failed" )
   in
   match
     Effect.perform
-      (Process_lines
-         ( Args
-             ( "/bin/sh",
-               [|
-                 "/bin/sh";
-                 "-c";
-                 "cd \"$1\" && exec claude --print --output-format stream-json \
-                  --verbose --include-partial-messages -- \"$2\"";
-                 "sh";
-                 cwd;
-                 prompt;
-               |] ),
-           fun line ->
-             match text_delta line with
-             | Some text -> on_delta text
-             | None -> () ))
+      (Process_lines (process, fun line -> List.iter emit (parse line)))
   with
+  | Unix.WEXITED 0 when Option.is_none !seen_session ->
+      raise (Protocol_error "agent stream omitted session ID")
   | Unix.WEXITED 0 -> ()
-  | _ -> failwith "claude failed"
+  | _ -> failwith failure

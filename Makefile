@@ -8,11 +8,11 @@ build:
 
 .PHONY: run
 run:
-	dune exec remote_dev $(ARGS)
+	dune exec remote_dev -- $(ARGS)
 
 .PHONY: watch
 watch:
-	dune exec --watch remote_dev $(ARGS)
+	dune exec --watch remote_dev -- $(ARGS)
 
 .PHONY: android-run
 android-run:

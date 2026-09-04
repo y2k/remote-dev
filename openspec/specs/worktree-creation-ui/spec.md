@@ -7,11 +7,15 @@
 ## Requirements
 
 ### Requirement: Start new worktree creation
-Система SHALL предоставлять в документе списка worktree интерактивную кнопку `New`, которая открывает UI создания worktree.
+When the backend startup agent is Claude, the system SHALL provide an interactive `New` button in the worktree-list document that opens the worktree creation UI. When the startup agent is OpenCode, the system SHALL omit that button and SHALL NOT advertise worktree creation.
 
 #### Scenario: User opens creation UI
-- **WHEN** пользователь отправляет событие кнопки `New` из документа списка worktree
-- **THEN** система возвращает документ с полем ввода имени новой ветки
+- **WHEN** the backend runs in Claude mode and the user sends the advertised `New` button event from the worktree-list document
+- **THEN** the system returns a document with a branch-name input
+
+#### Scenario: Worktree list is rendered in OpenCode mode
+- **WHEN** the backend returns the worktree-list document in OpenCode mode
+- **THEN** the document contains no `New` button or other advertised worktree-creation action
 
 ### Requirement: Accept a new branch name
 Система SHALL принимать непустое строковое значение поля имени ветки через текущий input event envelope и запускать одноразовую сессию локального Claude CLI, создающую Git worktree с этим именем. Пользователь не обязан выбирать путь worktree, существующую ветку или начальную ревизию.

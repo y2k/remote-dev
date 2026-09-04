@@ -2,6 +2,12 @@ module J = Yojson.Safe
 module Cmd = Remote_dev.Components.Cmd
 module Home_components = Remote_dev.Home_components
 
+let claude_environment : Remote_dev.Runtime.environment =
+  { agent = Remote_dev.Runtime.Claude; root = "/tmp/remote-dev-root" }
+
+let opencode_environment : Remote_dev.Runtime.environment =
+  { agent = Remote_dev.Runtime.OpenCode; root = "/tmp/remote-dev-root" }
+
 let with_process f =
   try f ()
   with effect Remote_dev.Runtime.Process_lines (_, on_line), k ->
@@ -248,23 +254,29 @@ let () =
         ]);
   let initial_emulator = Home_components.Emulator.init () |> fst in
   let initial_new_worktree = Home_components.New_worktree.init () |> fst in
-  let initial_worktrees = Home_components.Worktrees.init () |> fst in
+  let initial_worktrees =
+    Home_components.Worktrees.init claude_environment.root |> fst
+  in
   let initial_worktree path = Home_components.Worktree.init path |> fst in
-  let worktrees_document ?(emulator = initial_emulator) model =
-    Remote_dev.Server.to_json
+  let worktrees_document ?(environment = claude_environment)
+      ?(emulator = initial_emulator) model =
+    Remote_dev.Server.to_json environment
       { screen = Remote_dev.Home.Worktrees model; emulator }
   in
-  let worktree_document ?(emulator = initial_emulator) model =
-    Remote_dev.Server.to_json
+  let worktree_document ?(environment = claude_environment)
+      ?(emulator = initial_emulator) model =
+    Remote_dev.Server.to_json environment
       { screen = Remote_dev.Home.Worktree model; emulator }
   in
-  let creation_document ?(emulator = initial_emulator) model =
+  let creation_document ?(environment = claude_environment)
+      ?(emulator = initial_emulator) model =
     let creation = initial_new_worktree in
-    Remote_dev.Server.to_json
+    Remote_dev.Server.to_json environment
       { screen = Remote_dev.Home.New_worktree (model, creation); emulator }
   in
-  let creation_document_with ?(emulator = initial_emulator) model creation =
-    Remote_dev.Server.to_json
+  let creation_document_with ?(environment = claude_environment)
+      ?(emulator = initial_emulator) model creation =
+    Remote_dev.Server.to_json environment
       { screen = Remote_dev.Home.New_worktree (model, creation); emulator }
   in
   let home_event = Remote_dev.Home.msg_to_yojson in
@@ -320,11 +332,62 @@ let () =
     (fun right ->
       assert (has_text "Error: adb unavailable" right);
       assert (has_image "/emulators/emulator-5554/screenshot.png" right));
+  List.iter
+    (fun document ->
+      assert (has_text "Agent: Claude" document);
+      assert (not (has_text "Agent: OpenCode" document)))
+    [
+      worktrees_document listed_worktree;
+      creation_document listed_worktree;
+      worktree_document worktree;
+    ];
+  List.iter
+    (fun document ->
+      assert (has_text "Agent: OpenCode" document);
+      assert (not (has_text "Agent: Claude" document)))
+    [
+      worktrees_document ~environment:opencode_environment listed_worktree;
+      creation_document ~environment:opencode_environment listed_worktree;
+      worktree_document ~environment:opencode_environment worktree;
+    ];
+  assert (
+    not
+      (has_event
+         (home_event
+            (Remote_dev.Home.Worktrees_msg
+               Home_components.Worktrees.Open_creation))
+         (worktrees_document ~environment:opencode_environment listed_worktree)));
+  assert (
+    not
+      (has_event
+         (home_event
+            (Remote_dev.Home.Worktree_msg
+               (Home_components.Worktree.Set_prompt "/igor-pending-reviews")))
+         (worktree_document ~environment:opencode_environment worktree)));
+  assert (
+    not
+      (has_event
+         (home_event
+            (Remote_dev.Home.Worktree_msg
+               (Home_components.Worktree.Set_prompt "/igor-restart-mr-tests")))
+         (worktree_document ~environment:opencode_environment worktree)));
+  let opencode_home =
+    {
+      Remote_dev.Home.screen = Remote_dev.Home.Worktrees listed_worktree;
+      emulator = initial_emulator;
+    }
+  in
+  let unchanged, cmd =
+    Remote_dev.Home.update opencode_environment opencode_home
+      (Remote_dev.Home.Worktrees_msg Home_components.Worktrees.Open_creation)
+  in
+  assert (unchanged = opencode_home);
+  assert (Cmd.run cmd = None);
   assert (
     has_event
       (home_event
          (Remote_dev.Home.Worktree_msg
-            (Home_components.Worktree.Run_claude "__VALUE__")))
+            (Home_components.Worktree.Run_prompt "__VALUE__")))
       (worktree_document worktree));
   let round_trip message =
     assert (
@@ -356,12 +419,21 @@ let () =
               ( "event",
                 Remote_dev.Home.msg_to_yojson
                   (Remote_dev.Home.Worktree_msg
-                     (Home_components.Worktree.Run_claude "__VALUE__")) );
+                     (Home_components.Worktree.Run_prompt "__VALUE__")) );
               ("value", `String "prompt");
             ]))
     = Ok
         (Remote_dev.Home.Worktree_msg
-           (Home_components.Worktree.Run_claude "prompt")));
+           (Home_components.Worktree.Run_prompt "prompt")));
+  assert (
+    match
+      Remote_dev.Server.decode
+        (request_body
+           (Remote_dev.Home.Worktree_msg
+              (Home_components.Worktree.Session_started "attacker")))
+    with
+    | Error _ -> true
+    | Ok _ -> false);
   assert (
     match
       Remote_dev.Server.decode
@@ -382,7 +454,7 @@ let () =
     with
     | Error _ -> true
     | Ok _ -> false);
-  let initial, cmd = Remote_dev.Home.init () in
+  let initial, cmd = Remote_dev.Home.init claude_environment in
   assert (initial.emulator = initial_emulator);
   assert (
     match initial.screen with
@@ -400,7 +472,9 @@ let () =
           (Home_components.Emulator.Loaded (Ok [ emulator ]))
     | _ -> assert false
   in
-  let initialized_state, cmd = Remote_dev.Home.update initial initialized in
+  let initialized_state, cmd =
+    Remote_dev.Home.update claude_environment initial initialized
+  in
   assert (initialized_state.emulator.selected_emulator = Some "emulator-5554");
   assert (
     match with_process (fun () -> Cmd.run cmd) with
@@ -409,7 +483,7 @@ let () =
         true
     | _ -> false);
   let failed_state, cmd =
-    Remote_dev.Home.update initial
+    Remote_dev.Home.update claude_environment initial
       (Remote_dev.Home.Initialize_emulator
          (Home_components.Emulator.Loaded (Error "adb failed")))
   in
@@ -421,11 +495,11 @@ let () =
         true
     | _ -> false);
   Atomic.set Remote_dev.Server.state initialized_state;
-  Remote_dev.Server.reset ();
+  Remote_dev.Server.reset claude_environment;
   let initial = Atomic.get Remote_dev.Server.state in
   assert (initial.emulator = initial_emulator);
   let documents =
-    Remote_dev.Server.stream_body initial
+    Remote_dev.Server.stream_body claude_environment initial
       (Cmd.Run
          (fun () ->
            Some
@@ -473,23 +547,41 @@ let () =
     has_event
       (home_event
          (Remote_dev.Home.Worktree_msg
-            (Home_components.Worktree.Run_claude "__VALUE__")))
+            (Home_components.Worktree.Run_prompt "__VALUE__")))
       (worktree_document
-         { path = "/tmp/clicked"; prompt = ""; output = None; error = None }));
+         {
+           path = "/tmp/clicked";
+           prompt = "";
+           output = None;
+           error = None;
+           session_id = None;
+         }));
   assert (
     has_event
       (home_event
          (Remote_dev.Home.Worktree_msg
             (Home_components.Worktree.Set_prompt "/igor-pending-reviews")))
       (worktree_document
-         { path = "/tmp/clicked"; prompt = ""; output = None; error = None }));
+         {
+           path = "/tmp/clicked";
+           prompt = "";
+           output = None;
+           error = None;
+           session_id = None;
+         }));
   assert (
     has_event
       (home_event
          (Remote_dev.Home.Worktree_msg
             (Home_components.Worktree.Set_prompt "/igor-restart-mr-tests")))
       (worktree_document
-         { path = "/tmp/clicked"; prompt = ""; output = None; error = None }));
+         {
+           path = "/tmp/clicked";
+           prompt = "";
+           output = None;
+           error = None;
+           session_id = None;
+         }));
   assert (Cmd.run Cmd.none = None);
   assert (
     Cmd.run
@@ -498,7 +590,7 @@ let () =
          (Cmd.Run (fun () -> Some "child")))
     = Some "home:child");
   let next, cmd =
-    Remote_dev.Home.update
+    Remote_dev.Home.update claude_environment
       {
         screen = Remote_dev.Home.Worktrees initial_worktrees;
         emulator = initial_emulator;
@@ -513,7 +605,7 @@ let () =
     | Remote_dev.Home.Worktree _ ->
         false);
   let next, cmd =
-    Remote_dev.Home.update
+    Remote_dev.Home.update claude_environment
       {
         screen = Remote_dev.Home.Worktrees initial_worktrees;
         emulator = initial_emulator;
@@ -535,7 +627,7 @@ let () =
     }
   in
   let creation, cmd =
-    Remote_dev.Home.update
+    Remote_dev.Home.update claude_environment
       {
         screen = Remote_dev.Home.Worktrees listed_worktrees;
         emulator = selected_emulator;
@@ -544,19 +636,19 @@ let () =
   in
   assert (Cmd.run cmd = None);
   assert (
-    Remote_dev.Server.to_json creation
+    Remote_dev.Server.to_json claude_environment creation
     = creation_document ~emulator:selected_emulator listed_worktrees);
   let creation, cmd =
-    Remote_dev.Home.update creation
+    Remote_dev.Home.update claude_environment creation
       (Remote_dev.Home.New_worktree_msg
          (Home_components.New_worktree.Create "feature/new-worktree"))
   in
   assert (match cmd with Cmd.Run _ -> true | Cmd.Empty -> false);
   assert (
-    Remote_dev.Server.to_json creation
+    Remote_dev.Server.to_json claude_environment creation
     = creation_document ~emulator:selected_emulator listed_worktrees);
   let finished, cmd =
-    Remote_dev.Home.update creation
+    Remote_dev.Home.update claude_environment creation
       (Remote_dev.Home.New_worktree_msg
          (Home_components.New_worktree.Finished (Ok ())))
   in
@@ -567,14 +659,16 @@ let () =
       ->
         true
     | _ -> false);
-  let listed, cmd = Remote_dev.Home.update creation Remote_dev.Home.Back in
+  let listed, cmd =
+    Remote_dev.Home.update claude_environment creation Remote_dev.Home.Back
+  in
   assert (Cmd.run cmd = None);
   assert (
-    Remote_dev.Server.to_json listed
+    Remote_dev.Server.to_json claude_environment listed
     = worktrees_document ~emulator:selected_emulator listed_worktrees);
-  Remote_dev.Server.reset ();
+  Remote_dev.Server.reset claude_environment;
   let status, body, _ =
-    Remote_dev.Server.response
+    Remote_dev.Server.response claude_environment
       ~body:
         (request_body
            (Remote_dev.Home.Worktrees_msg
@@ -585,7 +679,7 @@ let () =
   assert (J.from_string body = creation_document initial_worktrees);
   let status, body, _ =
     with_created_worktree (fun () ->
-        Remote_dev.Server.response
+        Remote_dev.Server.response claude_environment
           ~body:
             (request_body
                (Remote_dev.Home.New_worktree_msg
@@ -617,7 +711,7 @@ let () =
     };
   let status, body, _ =
     with_failed_worktree_creation (fun () ->
-        Remote_dev.Server.response
+        Remote_dev.Server.response claude_environment
           ~body:
             (request_body
                (Remote_dev.Home.New_worktree_msg
@@ -639,7 +733,7 @@ let () =
       emulator = initial_emulator;
     };
   let status, body, _ =
-    Remote_dev.Server.response
+    Remote_dev.Server.response claude_environment
       ~body:
         (request_body
            (Remote_dev.Home.New_worktree_msg
@@ -652,13 +746,13 @@ let () =
     = creation_document_with listed_worktrees
         { error = Some "Branch is required" });
   let status, body, _ =
-    Remote_dev.Server.response
+    Remote_dev.Server.response claude_environment
       ~body:(request_body Remote_dev.Home.Back)
       `POST "/"
   in
   assert (status = `OK);
   assert (J.from_string body = worktrees_document listed_worktrees);
-  Remote_dev.Server.reset ();
+  Remote_dev.Server.reset claude_environment;
   let selected_emulators =
     [ { Remote_dev.Runtime.serial = "emulator-5554"; name = "Pixel" } ]
   in
@@ -675,7 +769,7 @@ let () =
       emulator = emulator_model;
     };
   let status, body, content_type =
-    Remote_dev.Server.response
+    Remote_dev.Server.response claude_environment
       ~body:
         (request_body
            (Remote_dev.Home.Worktrees_msg
@@ -688,10 +782,16 @@ let () =
   assert (
     worktree
     = worktree_document ~emulator:emulator_model
-        { path = "/tmp/clicked"; prompt = ""; output = None; error = None });
+        {
+          path = "/tmp/clicked";
+          prompt = "";
+          output = None;
+          error = None;
+          session_id = None;
+        });
   assert (not (has_event (`Assoc [ ("type", `String "back") ]) worktree));
   let status, body, _ =
-    Remote_dev.Server.response
+    Remote_dev.Server.response claude_environment
       ~body:
         (request_body
            (Remote_dev.Home.Worktree_msg
@@ -707,9 +807,10 @@ let () =
           prompt = "/igor-pending-reviews";
           output = None;
           error = None;
+          session_id = None;
         });
   let status, body, _ =
-    Remote_dev.Server.response
+    Remote_dev.Server.response claude_environment
       ~body:
         (request_body
            (Remote_dev.Home.Worktree_msg
@@ -725,27 +826,29 @@ let () =
           prompt = "/igor-restart-mr-tests";
           output = None;
           error = None;
+          session_id = None;
         });
   let document =
-    Remote_dev.Server.dispatch
+    Remote_dev.Server.dispatch claude_environment
       (Remote_dev.Home.Worktree_msg
          (Home_components.Worktree.Finished (Ok "answer")))
   in
   assert (
-    Remote_dev.Server.to_json document
+    Remote_dev.Server.to_json claude_environment document
     = worktree_document ~emulator:emulator_model
         {
           path = "/tmp/clicked";
           prompt = "/igor-restart-mr-tests";
           output = Some "answer";
           error = None;
+          session_id = None;
         });
   let status, body, _ =
-    Remote_dev.Server.response
+    Remote_dev.Server.response claude_environment
       ~body:
         (request_body
            (Remote_dev.Home.Worktree_msg
-              (Home_components.Worktree.Run_claude "new prompt")))
+              (Home_components.Worktree.Run_prompt "new prompt")))
       `POST "/"
   in
   assert (status = `OK);
@@ -757,10 +860,11 @@ let () =
           prompt = "new prompt";
           output = None;
           error = None;
+          session_id = None;
         });
   let status, body, content_type =
     with_process (fun () ->
-        Remote_dev.Server.response
+        Remote_dev.Server.response claude_environment
           ~body:(request_body Remote_dev.Home.Back)
           `POST "/")
   in
@@ -775,10 +879,12 @@ let () =
     | { screen = Remote_dev.Home.Worktree _; _ } ->
         false);
 
-  Remote_dev.Server.reset ();
+  Remote_dev.Server.reset claude_environment;
   with_emulator_screenshot ~available:true (fun () ->
-      with_process Remote_dev.Server.initialize);
-  let status, body, content_type = Remote_dev.Server.response `GET "/" in
+      with_process (fun () -> Remote_dev.Server.initialize claude_environment));
+  let status, body, content_type =
+    Remote_dev.Server.response claude_environment `GET "/"
+  in
   assert (status = `OK);
   assert (content_type = "application/json");
   assert (
@@ -788,7 +894,9 @@ let () =
     | { screen = Remote_dev.Home.New_worktree _; _ }
     | { screen = Remote_dev.Home.Worktree _; _ } ->
         false);
-  let status, body, content_type = Remote_dev.Server.response `GET "/" in
+  let status, body, content_type =
+    Remote_dev.Server.response claude_environment `GET "/"
+  in
   assert (status = `OK);
   assert (content_type = "application/json");
   assert (
@@ -801,7 +909,7 @@ let () =
   let previous = J.from_string body in
   let status, body, content_type =
     with_process (fun () ->
-        Remote_dev.Server.response
+        Remote_dev.Server.response claude_environment
           ~body:
             (request_body
                (Remote_dev.Home.Worktrees_msg Home_components.Worktrees.Load))
@@ -819,8 +927,9 @@ let () =
     | { screen = Remote_dev.Home.New_worktree _; _ }
     | { screen = Remote_dev.Home.Worktree _; _ } ->
         false);
-  Remote_dev.Server.reset ();
-  with_failed_emulator_load Remote_dev.Server.initialize;
+  Remote_dev.Server.reset claude_environment;
+  with_failed_emulator_load (fun () ->
+      Remote_dev.Server.initialize claude_environment);
   assert (
     match Atomic.get Remote_dev.Server.state with
     | {
@@ -829,15 +938,21 @@ let () =
     } ->
         true
     | _ -> false);
-  let status, _, _ = Remote_dev.Server.response `POST "/missing" in
+  let status, _, _ =
+    Remote_dev.Server.response claude_environment `POST "/missing"
+  in
   assert (status = `Not_found);
-  let status, _, _ = Remote_dev.Server.response `GET "/missing" in
+  let status, _, _ =
+    Remote_dev.Server.response claude_environment `GET "/missing"
+  in
   assert (status = `Not_found);
-  let status, _, _ = Remote_dev.Server.response ~body:"{}" `POST "/" in
+  let status, _, _ =
+    Remote_dev.Server.response claude_environment ~body:"{}" `POST "/"
+  in
   assert (status = `Bad_request);
-  Remote_dev.Server.reset ();
+  Remote_dev.Server.reset claude_environment;
   let status, body, _ =
-    Remote_dev.Server.response
+    Remote_dev.Server.response claude_environment
       ~body:(request_body Remote_dev.Home.Back)
       `POST "/"
   in
@@ -845,7 +960,7 @@ let () =
   assert (
     J.from_string body = worktrees_document { worktrees = []; error = None });
   let next, cmd =
-    Remote_dev.Home.update
+    Remote_dev.Home.update claude_environment
       {
         screen = Remote_dev.Home.Worktree (initial_worktree "/tmp/clicked");
         emulator = selected_emulator;
@@ -865,19 +980,19 @@ let () =
     | Remote_dev.Home.Worktree _ ->
         false);
   assert (next.emulator = selected_emulator);
-  Remote_dev.Server.reset ();
+  Remote_dev.Server.reset claude_environment;
   let status, body, _ =
-    Remote_dev.Server.response
+    Remote_dev.Server.response claude_environment
       ~body:
         (request_body
            (Remote_dev.Home.Worktree_msg
-              (Home_components.Worktree.Run_claude "prompt")))
+              (Home_components.Worktree.Run_prompt "prompt")))
       `POST "/"
   in
   assert (status = `OK);
   assert (
     J.from_string body = worktrees_document { worktrees = []; error = None });
-  Remote_dev.Server.reset ();
+  Remote_dev.Server.reset claude_environment;
   assert (
     match (Atomic.get Remote_dev.Server.state).screen with
     | Remote_dev.Home.Worktrees _ -> true
@@ -949,7 +1064,7 @@ let () =
   let home =
     { Remote_dev.Home.screen = Remote_dev.Home.Worktree model; emulator }
   in
-  let emulator_document = Remote_dev.Server.to_json home in
+  let emulator_document = Remote_dev.Server.to_json claude_environment home in
   assert (
     has_event
       (home_event
@@ -964,7 +1079,7 @@ let () =
       emulator_document);
   assert (has_image "/emulators/emulator-5554/screenshot.png" emulator_document);
   let home, cmd =
-    Remote_dev.Home.update home
+    Remote_dev.Home.update claude_environment home
       (Remote_dev.Home.Emulator_msg
          (Home_components.Emulator.Select "emulator-5556"))
   in
@@ -975,18 +1090,19 @@ let () =
     | Remote_dev.Home.Worktree model ->
         model.path = "/tmp/clicked"
         && model.prompt = "" && model.output = None && model.error = None
+        && model.session_id = None
     | Remote_dev.Home.Worktrees _ | Remote_dev.Home.New_worktree _ -> false);
   assert (
     has_image "/emulators/emulator-5556/screenshot.png"
-      (Remote_dev.Server.to_json home));
+      (Remote_dev.Server.to_json claude_environment home));
   let home, _cmd =
-    Remote_dev.Home.update home
+    Remote_dev.Home.update claude_environment home
       (Remote_dev.Home.Worktree_msg
-         (Home_components.Worktree.Run_claude "prompt"))
+         (Home_components.Worktree.Run_prompt "prompt"))
   in
   assert (home.emulator.selected_emulator = Some "emulator-5556");
   let home, _cmd =
-    Remote_dev.Home.update home
+    Remote_dev.Home.update claude_environment home
       (Remote_dev.Home.Worktree_msg
          (Home_components.Worktree.Finished (Ok "answer")))
   in
@@ -998,7 +1114,7 @@ let () =
         false);
   assert (home.emulator.selected_emulator = Some "emulator-5556");
   let home, _ =
-    Remote_dev.Home.update home
+    Remote_dev.Home.update claude_environment home
       (Remote_dev.Home.Worktree_msg
          (Home_components.Worktree.Finished (Error "failed")))
   in
@@ -1020,51 +1136,131 @@ let () =
   Atomic.set Remote_dev.Server.state
     {
       Remote_dev.Home.screen =
-        Remote_dev.Home.Worktree (initial_worktree "/tmp/clicked");
+        Remote_dev.Home.Worktree
+          {
+            (initial_worktree "/tmp/clicked") with
+            output = Some "old response";
+            error = Some "old error";
+          };
       emulator = selected_emulator;
     };
   assert (
     match
-      Remote_dev.Server.start_claude_stream
+      Remote_dev.Server.start_prompt_stream claude_environment
         (request_body
            (Remote_dev.Home.Worktree_msg
-              (Home_components.Worktree.Run_claude "prompt")))
+              (Home_components.Worktree.Run_prompt "prompt")))
     with
-    | Some { cwd; prompt } -> cwd = "/tmp/clicked" && prompt = "prompt"
+    | Some { agent; cwd; prompt; session_id } ->
+        agent = Remote_dev.Runtime.Claude
+        && cwd = "/tmp/clicked" && prompt = "prompt" && session_id = None
     | None -> false);
-  let hel = Remote_dev.Server.stream_output "Hel" in
+  assert (
+    J.from_string (Remote_dev.Server.stream_start claude_environment)
+    = worktree_document ~emulator:selected_emulator
+        {
+          path = "/tmp/clicked";
+          prompt = "prompt";
+          output = None;
+          error = None;
+          session_id = None;
+        });
+  assert (
+    Remote_dev.Server.stream_event claude_environment
+      (Remote_dev.Runtime.Session "session-1")
+    = None);
+  assert (
+    match (Atomic.get Remote_dev.Server.state).screen with
+    | Remote_dev.Home.Worktree { session_id = Some "session-1"; _ } -> true
+    | Remote_dev.Home.Worktrees _ | Remote_dev.Home.New_worktree _
+    | Remote_dev.Home.Worktree _ ->
+        false);
+  assert (
+    match
+      Remote_dev.Server.start_prompt_stream claude_environment
+        (request_body
+           (Remote_dev.Home.Worktree_msg
+              (Home_components.Worktree.Run_prompt "continued")))
+    with
+    | Some { agent; cwd; prompt; session_id } ->
+        agent = Remote_dev.Runtime.Claude
+        && cwd = "/tmp/clicked" && prompt = "continued"
+        && session_id = Some "session-1"
+    | None -> false);
+  let hel =
+    Remote_dev.Server.stream_event claude_environment
+      (Remote_dev.Runtime.Text "Hel")
+    |> Option.get
+  in
   assert (not (String.contains hel '\n'));
   assert (
     J.from_string hel
     = worktree_document ~emulator:selected_emulator
         {
           path = "/tmp/clicked";
-          prompt = "prompt";
+          prompt = "continued";
           output = Some "Hel";
           error = None;
+          session_id = Some "session-1";
         });
-  let hello = Remote_dev.Server.stream_output "lo" in
+  let hello =
+    Remote_dev.Server.stream_event claude_environment
+      (Remote_dev.Runtime.Text "lo")
+    |> Option.get
+  in
   assert (
     J.from_string hello
     = worktree_document ~emulator:selected_emulator
         {
           path = "/tmp/clicked";
-          prompt = "prompt";
+          prompt = "continued";
           output = Some "Hello";
           error = None;
+          session_id = Some "session-1";
         });
   assert (
-    J.from_string (Remote_dev.Server.stream_error "failed")
+    J.from_string (Remote_dev.Server.stream_error claude_environment "failed")
     = worktree_document ~emulator:selected_emulator
         {
           path = "/tmp/clicked";
-          prompt = "prompt";
+          prompt = "continued";
           output = Some "Hello";
           error = Some "failed";
+          session_id = Some "session-1";
         });
+  let producer_updates = ref [] in
+  Remote_dev.Server.produce_prompt
+    (fun () -> failwith "ordinary")
+    (fun update -> producer_updates := update :: !producer_updates);
+  assert (!producer_updates = [ `Error "Failure(\"ordinary\")" ]);
+  assert (
+    try
+      Remote_dev.Server.produce_prompt
+        (fun () -> raise (Remote_dev.Runtime.Protocol_error "fatal"))
+        (fun update -> producer_updates := update :: !producer_updates);
+      false
+    with
+    | Remote_dev.Runtime.Protocol_error "fatal" -> true
+    | _ -> false);
+  assert (!producer_updates = [ `Error "Failure(\"ordinary\")" ]);
+  let selected = Atomic.get Remote_dev.Server.state in
+  let listed, _ =
+    Remote_dev.Home.update claude_environment selected Remote_dev.Home.Back
+  in
+  let reopened, _ =
+    Remote_dev.Home.update claude_environment listed
+      (Remote_dev.Home.Worktrees_msg
+         (Home_components.Worktrees.Select "/tmp/clicked"))
+  in
+  assert (
+    match reopened.screen with
+    | Remote_dev.Home.Worktree { session_id = None; _ } -> true
+    | Remote_dev.Home.Worktrees _ | Remote_dev.Home.New_worktree _
+    | Remote_dev.Home.Worktree _ ->
+        false);
   let status, body, content_type =
     with_emulator_screenshot ~available:true (fun () ->
-        Remote_dev.Server.response `GET
+        Remote_dev.Server.response claude_environment `GET
           "/emulators/emulator-5554/screenshot.png")
   in
   assert (status = `OK);
@@ -1074,11 +1270,12 @@ let () =
   assert (Httpun.Headers.get headers "cache-control" = Some "no-store");
   let status, _, _ =
     with_emulator_screenshot ~available:false (fun () ->
-        Remote_dev.Server.response `GET
+        Remote_dev.Server.response claude_environment `GET
           "/emulators/emulator-5554/screenshot.png")
   in
   assert (status = `Not_found);
   let status, _, _ =
-    Remote_dev.Server.response `GET "/emulators/emulator-5554/other.png"
+    Remote_dev.Server.response claude_environment `GET
+      "/emulators/emulator-5554/other.png"
   in
   assert (status = `Not_found)

@@ -34,44 +34,88 @@ let rec replace_value value = function
 let decode body =
   match decode_request body with
   | Error _ as error -> error
-  | Ok { event; value } ->
-      Home.msg_of_yojson (replace_value (Option.value ~default:"" value) event)
+  | Ok { event; value } -> (
+      match
+        Home.msg_of_yojson
+          (replace_value (Option.value ~default:"" value) event)
+      with
+      | Ok (Home.Worktree_msg (Worktree.Session_started _)) ->
+          Error "Invalid event request"
+      | result -> result)
 
-let to_json model = Components.to_json Home.msg_to_yojson (Home.view model)
-let document model = J.pretty_to_string (to_json model)
-let stream_document model = J.to_string (to_json model)
-let initial = Home.init () |> fst
-let state = Atomic.make initial
-let reset () = Atomic.set state initial
+let to_json environment model =
+  Components.to_json Home.msg_to_yojson (Home.view environment model)
 
-let step message =
-  let next, cmd = Home.update (Atomic.get state) message in
+let document environment model = J.pretty_to_string (to_json environment model)
+let stream_document environment model = J.to_string (to_json environment model)
+
+let state =
+  Atomic.make
+    {
+      Home.screen =
+        Worktrees { Home_components.Worktrees.worktrees = []; error = None };
+      emulator =
+        { Emulator.emulators = []; selected_emulator = None; error = None };
+    }
+
+let stream_start environment = stream_document environment (Atomic.get state)
+let reset environment = Atomic.set state (Home.init environment |> fst)
+
+let step environment message =
+  let next, cmd = Home.update environment (Atomic.get state) message in
   Atomic.set state next;
   (next, cmd)
 
-let rec dispatch message =
-  let next, cmd = step message in
+let rec dispatch environment message =
+  let next, cmd = step environment message in
   match Components.Cmd.run cmd with
   | None -> next
-  | Some message -> dispatch message
+  | Some message -> dispatch environment message
 
-type claude_stream = { cwd : string; prompt : string }
+type prompt_stream = {
+  agent : Runtime.agent;
+  cwd : string;
+  prompt : string;
+  session_id : string option;
+}
 
-let start_claude_stream body =
+let start_prompt_stream ({ Runtime.agent; _ } as environment) body =
   match decode body with
-  | Ok (Home.Worktree_msg (Worktree.Run_claude prompt) as message) -> (
-      let next, _ = step message in
+  | Ok (Home.Worktree_msg (Worktree.Run_prompt prompt) as message) -> (
+      let next, _ = step environment message in
       match next.screen with
-      | Home.Worktree { path; _ } -> Some { cwd = path; prompt }
+      | Home.Worktree { path; session_id; _ } ->
+          Some { agent; cwd = path; prompt; session_id }
       | Home.Worktrees _ | Home.New_worktree _ -> None)
   | Ok _ | Error _ -> None
 
-let stream_output output =
-  J.to_string (to_json (dispatch (Home.Worktree_msg (Worktree.Output output))))
+let stream_event environment = function
+  | Runtime.Session session_id ->
+      ignore
+        (dispatch environment
+           (Home.Worktree_msg (Worktree.Session_started session_id)));
+      None
+  | Runtime.Text output ->
+      Some
+        (J.to_string
+           (to_json environment
+              (dispatch environment (Home.Worktree_msg (Worktree.Output output)))))
 
-let stream_error error =
+let stream_error environment error =
   J.to_string
-    (to_json (dispatch (Home.Worktree_msg (Worktree.Finished (Error error)))))
+    (to_json environment
+       (dispatch environment
+          (Home.Worktree_msg (Worktree.Finished (Error error)))))
+
+let protect_prompt f =
+  try
+    f ();
+    `Done
+  with
+  | Runtime.Protocol_error _ as exn -> raise exn
+  | exn -> `Error (Printexc.to_string exn)
+
+let produce_prompt run add = add (protect_prompt run)
 
 let screenshot_serial target =
   let prefix = "/emulators/" and suffix = "/screenshot.png" in
@@ -96,29 +140,30 @@ let screenshot_response serial =
   then (`OK, Runtime.capture_emulator_screenshot serial, "image/png")
   else (`Not_found, "Emulator Not Found", "text/plain")
 
-let stream_body state cmd =
-  let documents = ref [ stream_document state ] in
+let stream_body environment state cmd =
+  let documents = ref [ stream_document environment state ] in
   let rec run cmd =
     match Components.Cmd.run cmd with
     | None -> ()
     | Some message ->
-        let state, next = step message in
-        documents := stream_document state :: !documents;
+        let state, next = step environment message in
+        documents := stream_document environment state :: !documents;
         run next
   in
   run cmd;
   String.concat "\n" (List.rev !documents) ^ "\n"
 
-let initialize () =
-  let model, cmd = Home.init () in
+let initialize environment =
+  let model, cmd = Home.init environment in
   Atomic.set state model;
   match Components.Cmd.run cmd with
   | None -> ()
-  | Some message -> ignore (dispatch message)
+  | Some message -> ignore (dispatch environment message)
 
-let response ?(body = "") meth target =
+let response environment ?(body = "") meth target =
   match (meth, target) with
-  | `GET, "/" -> (`OK, document (Atomic.get state), "application/json")
+  | `GET, "/" ->
+      (`OK, document environment (Atomic.get state), "application/json")
   | `GET, target -> (
       match screenshot_serial target with
       | Some serial -> screenshot_response serial
@@ -127,11 +172,12 @@ let response ?(body = "") meth target =
       match decode body with
       | Error message -> (`Bad_request, message, "text/plain")
       | Ok message -> (
-          let state, cmd = step message in
+          let state, cmd = step environment message in
           match cmd with
-          | Components.Cmd.Empty -> (`OK, document state, "application/json")
+          | Components.Cmd.Empty ->
+              (`OK, document environment state, "application/json")
           | Components.Cmd.Run _ ->
-              (`OK, stream_body state cmd, "application/x-ndjson")))
+              (`OK, stream_body environment state cmd, "application/x-ndjson")))
   | _ -> (`Not_found, "Not Found", "text/plain")
 
 let stream_headers =
@@ -148,7 +194,7 @@ let screenshot_headers body =
       ("cache-control", "no-store");
     ]
 
-let respond ~domain_mgr { Gluten.reqd; _ } =
+let respond environment ~domain_mgr { Gluten.reqd; _ } =
   let request = Httpun.Reqd.request reqd in
   let reply ?headers (status, body, content_type) =
     let headers =
@@ -165,7 +211,7 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
       (Httpun.Response.create ~headers status)
       body
   in
-  let stream { cwd; prompt } =
+  let stream { agent; cwd; prompt; session_id } =
     let writer =
       Httpun.Reqd.respond_with_streaming ~flush_headers_immediately:true reqd
         (Httpun.Response.create ~headers:stream_headers `OK)
@@ -177,25 +223,23 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
       Httpun.Body.Writer.flush writer (fun _ -> Eio.Promise.resolve resolve ());
       Eio.Promise.await flushed
     in
+    write (stream_start environment);
     let producer () =
-      let result =
-        try
+      produce_prompt
+        (fun () ->
           Eio.Domain_manager.run domain_mgr (fun () ->
               Runtime.with_unix_process (fun () ->
-                  Runtime.stream_claude cwd prompt (fun delta ->
-                      Eio.Stream.add updates (`Delta delta))));
-          `Done
-        with exn -> `Error (Printexc.to_string exn)
-      in
-      Eio.Stream.add updates result
+                  Runtime.stream_prompt agent ~cwd ~prompt ~session_id
+                    (fun event -> Eio.Stream.add updates (`Event event)))))
+        (Eio.Stream.add updates)
     in
     let rec consumer () =
       match Eio.Stream.take updates with
-      | `Delta delta ->
-          write (stream_output delta);
+      | `Event event ->
+          Option.iter write (stream_event environment event);
           consumer ()
       | `Done -> ()
-      | `Error error -> write (stream_error error)
+      | `Error error -> write (stream_error environment error)
     in
     Eio.Fiber.both producer consumer;
     Httpun.Body.Writer.close writer
@@ -206,7 +250,8 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
         (Httpun.Response.create ~headers:stream_headers `OK)
     in
     let write state =
-      Httpun.Body.Writer.write_string writer (stream_document state ^ "\n");
+      Httpun.Body.Writer.write_string writer
+        (stream_document environment state ^ "\n");
       let flushed, resolve = Eio.Promise.create () in
       Httpun.Body.Writer.flush writer (fun _ -> Eio.Promise.resolve resolve ());
       Eio.Promise.await flushed
@@ -216,7 +261,7 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
       match Components.Cmd.run cmd with
       | None -> ()
       | Some message ->
-          let state, next = step message in
+          let state, next = step environment message in
           write state;
           run next
     in
@@ -230,12 +275,15 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
       (Httpun.Reqd.request_body reqd)
       ~on_eof:(fun () ->
         let body = Buffer.contents body in
-        match start_claude_stream body with
+        match start_prompt_stream environment body with
         | Some request -> stream request
         | None -> (
             match (request.meth, request.target) with
             | `GET, "/" ->
-                reply (`OK, document (Atomic.get state), "application/json")
+                reply
+                  ( `OK,
+                    document environment (Atomic.get state),
+                    "application/json" )
             | `GET, target -> (
                 match screenshot_serial target with
                 | Some serial -> (
@@ -253,10 +301,11 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
                 match decode body with
                 | Error message -> reply (`Bad_request, message, "text/plain")
                 | Ok message -> (
-                    let state, cmd = step message in
+                    let state, cmd = step environment message in
                     match cmd with
                     | Components.Cmd.Empty ->
-                        reply (`OK, document state, "application/json")
+                        reply
+                          (`OK, document environment state, "application/json")
                     | Components.Cmd.Run _ -> stream_ui state cmd))
             | _ -> reply (`Not_found, "Not Found", "text/plain")))
       ~on_read:(fun chunk ~off ~len ->
@@ -265,8 +314,8 @@ let respond ~domain_mgr { Gluten.reqd; _ } =
   in
   read ()
 
-let run ~net ~domain_mgr =
-  initialize ();
+let run environment ~net ~domain_mgr =
+  initialize environment;
   Eio.Switch.run @@ fun sw ->
   let socket =
     Eio.Net.listen ~sw ~reuse_addr:true ~backlog:128 net
@@ -274,7 +323,7 @@ let run ~net ~domain_mgr =
   in
   let handler =
     Httpun_eio.Server.create_connection_handler ~sw
-      ~request_handler:(fun _ reqd -> respond ~domain_mgr reqd)
+      ~request_handler:(fun _ reqd -> respond environment ~domain_mgr reqd)
       ~error_handler:(fun _ ?request:_ _ start_response ->
         Httpun.Body.Writer.close (start_response Httpun.Headers.empty))
   in

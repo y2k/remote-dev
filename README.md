@@ -1,10 +1,10 @@
 # remote_dev
 
-`remote_dev` is a local development tool for browsing Git worktrees from an Android client and sending a prompt to the locally installed Claude CLI in a selected worktree.
+`remote_dev` is a local development tool for browsing Git worktrees from an Android client and sending prompts to a locally installed Claude or OpenCode CLI in a selected worktree.
 
 ## Security
 
-This is a single-user, trusted-LAN development tool, not a public service. The backend listens on port `8080` without authentication. A client on the network can select a worktree and submit prompts to the Claude CLI running with the server user's local Claude configuration and permissions.
+This is a single-user, trusted-LAN development tool, not a public service. The backend listens on port `8080` without authentication. A client on the network can select a worktree and submit prompts to the selected CLI using the server user's local configuration and permissions. OpenCode runs with `--auto`, which approves permission requests not explicitly denied and is not a sandbox.
 
 Run it only on a network you trust. Do not expose port `8080` to the internet.
 
@@ -17,7 +17,7 @@ Android client
     v
 OCaml / Eio server on :8080
     |-- git worktree list
-    |-- claude --print stream-json in the selected worktree
+    |-- claude --print stream-json or opencode run --format json
     `-- adb devices and screencap for selected Android emulators
 ```
 
@@ -27,7 +27,8 @@ The server returns a backend-defined UI document. The Android client renders tha
 
 - A POSIX environment with Dune 3.24 or newer. Dune obtains the OCaml compiler and project dependencies from `dune.lock` on the first build.
 - Git.
-- The `claude` CLI installed, authenticated, and available on `PATH` for the server process.
+- For `--agent claude`, the `claude` CLI installed, authenticated, and available on `PATH`.
+- For `--agent opencode`, OpenCode 1.18.20 or newer installed, authenticated, and available on `PATH`.
 - Android Platform Tools (`adb`) on `PATH` when using emulator screenshots.
 - Android Studio or an Android SDK setup that can build the `android/` Gradle project.
 - An Android device on the same trusted LAN as the backend.
@@ -40,13 +41,22 @@ Build the project:
 make build
 ```
 
-Start the backend for a Git repository:
+Start the backend with the required agent and an optional Git repository root:
 
 ```sh
-make run ARGS=/path/to/repository
+make run ARGS="--agent claude /path/to/repository"
+make run ARGS="--agent opencode /path/to/repository"
 ```
 
-If `ARGS` is omitted, the server uses its current working directory as the Git repository root. The server listens on all IPv4 interfaces at port `8080`.
+Omit only the repository root to use the current working directory:
+
+```sh
+make run ARGS="--agent opencode"
+```
+
+The selected agent cannot be changed without restarting the backend. The server does not preflight executable availability or version; a missing executable is reported when a prompt is run. The server listens on all IPv4 interfaces at port `8080`.
+
+Worktree creation and the `/igor-pending-reviews` and `/igor-restart-mr-tests` shortcuts are available only in Claude mode. OpenCode mode can use existing worktrees but does not create them.
 
 ## Build The Android Client
 
@@ -95,10 +105,17 @@ event value advertised by the node into `event`:
 and `back` from a selected worktree, return `application/x-ndjson` with the document
 before and after the load command.
 
-A successful `run_claude` also returns `application/x-ndjson`. Each nonempty line is
-a compact complete UI document with the accumulated Claude text; the Android client
-replaces its displayed document for every line until the response closes. If Claude
-fails after the stream starts, the final document contains the error.
+A successful `run_prompt` also returns `application/x-ndjson`. Each nonempty line is
+a compact complete UI document with the current response accumulated so far; the
+Android client replaces its displayed document for every line until the response
+closes. Claude streams text deltas, while OpenCode emits completed text parts and can
+therefore update less frequently. If the selected CLI fails after the stream starts,
+the final document contains the error.
+
+The first prompt on an open worktree screen starts a CLI session. Later prompts on
+that screen explicitly resume its session ID while replacing the previously rendered
+response. Returning to the worktree list or restarting the backend forgets the ID;
+the CLI-owned session remains in that CLI's local history.
 
 The emulator panel appears on every screen. Its buttons send a root event such as
 `["Emulator_msg",["Select","emulator-5554"]]`. The selected serial is global and
