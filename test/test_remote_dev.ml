@@ -1,6 +1,7 @@
 module J = Yojson.Safe
 module Cmd = Remote_dev.Components.Cmd
 module Home_components = Remote_dev.Home_components
+module Result_yojson = Remote_dev.Result_yojson
 
 let claude_environment : Remote_dev.Runtime.environment =
   { agent = Remote_dev.Runtime.Claude; root = "/tmp/remote-dev-root" }
@@ -389,6 +390,28 @@ let () =
          (Remote_dev.Home.Worktree_msg
             (Home_components.Worktree.Run_prompt "__VALUE__")))
       (worktree_document worktree));
+  let string_to_yojson value = `String value in
+  let string_of_yojson = function
+    | `String value -> Ok value
+    | _ -> Error "string"
+  in
+  let result_to_yojson =
+    Result_yojson.result_to_yojson string_to_yojson string_to_yojson
+  in
+  let result_of_yojson =
+    Result_yojson.result_of_yojson string_of_yojson string_of_yojson
+  in
+  assert (
+    result_to_yojson (Ok "value") = `List [ `String "Ok"; `String "value" ]);
+  assert (
+    result_to_yojson (Error "failed")
+    = `List [ `String "Error"; `String "failed" ]);
+  assert (
+    result_of_yojson (`List [ `String "Ok"; `String "value" ]) = Ok (Ok "value"));
+  assert (
+    result_of_yojson (`List [ `String "Error"; `String "failed" ])
+    = Ok (Error "failed"));
+  assert (Result.is_error (result_of_yojson (`List [ `String "Other"; `Null ])));
   let round_trip message =
     assert (
       Remote_dev.Home.msg_of_yojson (Remote_dev.Home.msg_to_yojson message)

@@ -13,10 +13,6 @@
 
 (license GPL-3.0-only)
 
-(pin
- (url "git+https://github.com/y2k/ppx_deriving_yojson.git")
- (package (name ppx_deriving_yojson)))
-
 (package
  (name remote_dev)
  (synopsis "Remote development tool with an Android client")

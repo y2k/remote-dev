@@ -3,6 +3,8 @@ open Components
 module New_worktree = struct
   type model = { error : string option }
 
+  open Result_yojson
+
   type msg =
     | Clear_error
     | Create of string
@@ -43,6 +45,8 @@ module Emulator = struct
     selected_emulator : string option;
     error : string option;
   }
+
+  open Result_yojson
 
   type msg =
     | Loaded of (Runtime.emulator list, string) result
@@ -113,6 +117,8 @@ module Worktree = struct
     session_id : string option;
   }
 
+  open Result_yojson
+
   type msg =
     | Clear_error
     | Run_prompt of string
@@ -178,6 +184,8 @@ end
 
 module Worktrees = struct
   type model = { worktrees : Runtime.worktree list; error : string option }
+
+  open Result_yojson
 
   type msg =
     | Load
