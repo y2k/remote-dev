@@ -1,10 +1,10 @@
 # remote_dev
 
-`remote_dev` is a local development tool for browsing Git worktrees from an Android client and sending prompts to a locally installed Claude or OpenCode CLI in a selected worktree.
+`remote_dev` is a local development tool for browsing Claude worktrees or attaching an Android client to existing sessions from a local OpenCode server.
 
 ## Security
 
-This is a single-user, trusted-LAN development tool, not a public service. The backend listens on port `8080` without authentication. A client on the network can select a worktree and submit prompts to the selected CLI using the server user's local configuration and permissions. OpenCode runs with `--auto`, which approves permission requests not explicitly denied and is not a sandbox.
+This is a single-user, trusted-LAN development tool, not a public service. The backend listens on port `8080` without authentication. A client on the network can submit prompts using the server user's local configuration and permissions. The OpenCode API remains localhost-only on port `4096`; remote_dev exposes session titles, directories, textual transcripts, and controls for every project known to that OpenCode server.
 
 Run it only on a network you trust. Do not expose port `8080` to the internet.
 
@@ -16,8 +16,8 @@ Android client
     | POST / (JSON UI events)
     v
 OCaml / Eio server on :8080
-    |-- git worktree list
-    |-- claude --print stream-json or opencode run --format json
+    |-- Claude: git worktrees and claude --print stream-json
+    |-- OpenCode: HTTP API on 127.0.0.1:4096
     `-- adb devices and screencap for selected Android emulators
 ```
 
@@ -28,7 +28,7 @@ The server returns a backend-defined UI document. The Android client renders tha
 - A POSIX environment with Dune 3.24 or newer. Dune obtains the OCaml compiler and project dependencies from `dune.lock` on the first build.
 - Git.
 - For `--agent claude`, the `claude` CLI installed, authenticated, and available on `PATH`.
-- For `--agent opencode`, OpenCode 1.18.20 or newer installed, authenticated, and available on `PATH`.
+- For `--agent opencode`, OpenCode 1.18.20 or newer installed and authenticated.
 - Android Platform Tools (`adb`) on `PATH` when using emulator screenshots.
 - Android Studio or an Android SDK setup that can build the `android/` Gradle project.
 - An Android device on the same trusted LAN as the backend.
@@ -41,22 +41,24 @@ Build the project:
 make build
 ```
 
-Start the backend with the required agent and an optional Git repository root:
+Claude accepts an optional Git repository root and defaults to the current directory:
 
 ```sh
 make run ARGS="--agent claude /path/to/repository"
-make run ARGS="--agent opencode /path/to/repository"
+make run ARGS="--agent claude"
 ```
 
-Omit only the repository root to use the current working directory:
+For OpenCode, first start the fixed localhost server, optionally attach its terminal UI, then start remote_dev without a repository root:
 
 ```sh
+opencode serve --hostname 127.0.0.1 --port 4096
+opencode attach http://127.0.0.1:4096
 make run ARGS="--agent opencode"
 ```
 
-The selected agent cannot be changed without restarting the backend. The server does not preflight executable availability or version; a missing executable is reported when a prompt is run. The server listens on all IPv4 interfaces at port `8080`.
+`opencode attach` is optional and can run in another terminal, but it is required to answer permissions or questions. OpenCode mode rejects a positional repository root. It lists existing sessions from all projects known to the server and does not create sessions.
 
-Worktree creation and the `/igor-pending-reviews` and `/igor-restart-mr-tests` shortcuts are available only in Claude mode. OpenCode mode can use existing worktrees but does not create them.
+The selected agent cannot be changed without restarting remote_dev. The backend does not start or stop `opencode serve` and reports connection or protocol errors in the UI. It listens on all IPv4 interfaces at port `8080`.
 
 ## Build The Android Client
 
@@ -81,41 +83,32 @@ Override the local value for one build when needed:
 ./gradlew assembleDebug -PbackendHost=192.168.0.42
 ```
 
-On Android 17 and later, grant the app Local Network Access permission before it can contact the backend. See [`android/README.md`](android/README.md) for the Android-specific setup summary.
+On Android 17 and later, grant the app Local Network Access permission before it can contact the backend.
 
 ## HTTP Protocol
 
-The server loads running ADB emulators once, then loads the initial worktree list,
-before accepting HTTP requests. The client starts a UI session with `GET /`, which
-returns the current document as `application/json`.
+The server loads running ADB emulators once, then loads the initial Claude worktree list or the OpenCode session list before accepting HTTP requests. The client starts a UI session with `GET /`, which returns the current document as `application/json`.
 
 Interactive UI nodes use `POST /` with a JSON event envelope. The client copies the
 event value advertised by the node into `event`:
 
 ```json
 {
-  "event": ["Worktrees_msg", ["Load"]],
+  "event": ["Refresh"],
   "value": null
 }
 ```
 
 `value` is either a string or `null`; the server substitutes a string value for the
-`"__VALUE__"` marker in an input event. Events without a command return one complete
-`application/json` UI document. Events that load worktrees, including manual refresh
-and `back` from a selected worktree, return `application/x-ndjson` with the document
-before and after the load command.
+`"__VALUE__"` marker in an input event. Pull-to-refresh always sends the provider-neutral root `Refresh` event. It reloads the current Claude worktree list, OpenCode all-server session list, or selected OpenCode session. Finite load commands return `application/x-ndjson` with documents before and after the load.
 
-A successful `run_prompt` also returns `application/x-ndjson`. Each nonempty line is
-a compact complete UI document with the current response accumulated so far; the
-Android client replaces its displayed document for every line until the response
-closes. Claude streams text deltas, while OpenCode emits completed text parts and can
-therefore update less frequently. If the selected CLI fails after the stream starts,
-the final document contains the error.
+A Claude prompt returns `application/x-ndjson`. Each nonempty line is a compact complete UI document with the current response accumulated so far; the Android client replaces its displayed document for every line until the response closes. If Claude fails after the stream starts, the final document contains the error.
 
-The first prompt on an open worktree screen starts a CLI session. Later prompts on
-that screen explicitly resume its session ID while replacing the previously rendered
-response. Returning to the worktree list or restarting the backend forgets the ID;
-the CLI-owned session remains in that CLI's local history.
+An ordinary OpenCode prompt is sent to `prompt_async`; remote_dev waits only for its `204` acceptance and returns one `application/json` document. A recognized slash command uses the command endpoint in an application-scoped background fiber and also returns immediately. There is no automatic command-to-prompt fallback. New transcript text and status appear after manual refresh. A busy session exposes Stop; retrying remains visible until OpenCode leaves retry state.
+
+Pending OpenCode permissions and questions are displayed only as `Needs input in OpenCode`. Answer them in an `opencode attach` terminal. The Android client intentionally cannot approve or reject them.
+
+In Claude mode, the first prompt on an open worktree screen starts a CLI session. Later prompts on that screen explicitly resume its session ID while replacing the previously rendered response. Returning to the worktree list or restarting the backend forgets the ID; the Claude-owned session remains in its local history. OpenCode session metadata, transcript, and status always come from `opencode serve`.
 
 The emulator panel appears on every screen. Its buttons send a root event such as
 `["Emulator_msg",["Select","emulator-5554"]]`. The selected serial is global and
@@ -130,10 +123,13 @@ a non-success response.
 
 The UI document supports these nodes:
 
-- `column`: vertically arranged `children`.
-- `row`: horizontally arranged `children`. An optional `weights` array contains
-  one positive number per child and divides the available width proportionally;
-  without it, children keep their content-sized widths.
+- `column`: vertically arranged `children`. An optional `weights` array makes the
+  column fill the available height. Zero-weight children keep their content height;
+  positive-weight children divide the remaining height proportionally and scroll
+  vertically when their content overflows.
+- `row`: horizontally arranged `children`. Its optional `weights` array makes the row
+  fill the available width. Zero-weight children keep their content width and
+  positive-weight children divide the remaining width proportionally.
 - `text`: a `text` string.
 - `button`: a `label` string and optional backend `event`.
 - `input`: a `label`, backend `event`, and optional initial `text`.
@@ -151,6 +147,30 @@ emulator panel second:
     { "@type": "column", "children": [] }
   ],
   "weights": [2, 1]
+}
+```
+
+The selected screen uses a weighted column inside the left pane. Transcript or Claude output gets the remaining height while controls remain content-sized. For example, an OpenCode session has this inner shape:
+
+```json
+{
+  "@type": "column",
+  "children": [
+    { "@type": "column", "children": [] },
+    { "@type": "text", "text": "OpenCode session" },
+    { "@type": "text", "text": "Session title" },
+    { "@type": "text", "text": "/path/to/project" },
+    { "@type": "text", "text": "Status: idle" },
+    { "@type": "column", "children": [] },
+    { "@type": "column", "children": [] },
+    {
+      "@type": "input",
+      "label": "Prompt",
+      "event": ["Session_msg", ["Run_prompt", "__VALUE__"]],
+      "text": ""
+    }
+  ],
+  "weights": [0, 0, 0, 0, 0, 1, 0, 0]
 }
 ```
 

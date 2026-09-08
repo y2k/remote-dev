@@ -41,6 +41,12 @@ let decode body =
       with
       | Ok (Home.Worktree_msg (Worktree.Session_started _)) ->
           Error "Invalid event request"
+      | Ok (Home.Sessions_msg (Sessions.Loaded _))
+      | Ok (Home.Session_msg (Session.Loaded _))
+      | Ok (Home.Session_msg Session.Missing)
+      | Ok (Home.Session_msg (Session.Submitted _))
+      | Ok (Home.Session_msg (Session.Command_finished _)) ->
+          Error "Invalid event request"
       | result -> result)
 
 let to_json environment model =
@@ -73,21 +79,65 @@ let rec dispatch environment message =
   | Some message -> dispatch environment message
 
 type prompt_stream = {
-  agent : Runtime.agent;
   cwd : string;
   prompt : string;
   session_id : string option;
 }
 
-let start_prompt_stream ({ Runtime.agent; _ } as environment) body =
-  match decode body with
-  | Ok (Home.Worktree_msg (Worktree.Run_prompt prompt) as message) -> (
+let start_prompt_stream environment body =
+  match (environment, decode body) with
+  | ( Runtime.Claude _,
+      Ok (Home.Worktree_msg (Worktree.Run_prompt prompt) as message) ) -> (
       let next, _ = step environment message in
       match next.screen with
       | Home.Worktree { path; session_id; _ } ->
-          Some { agent; cwd = path; prompt; session_id }
-      | Home.Worktrees _ | Home.New_worktree _ -> None)
-  | Ok _ | Error _ -> None
+          Some { cwd = path; prompt; session_id }
+      | Home.Worktrees _ | Home.New_worktree _ | Home.Sessions _
+      | Home.Session _ ->
+          None)
+  | (Runtime.Claude _ | Runtime.OpenCode), (Ok _ | Error _) -> None
+
+type opencode_command = {
+  session : Runtime.opencode_session;
+  command : string;
+  arguments : string;
+}
+
+let start_opencode_command environment body =
+  match (environment, decode body) with
+  | ( Runtime.OpenCode,
+      Ok (Home.Session_msg (Session.Run_prompt prompt) as message) ) -> (
+      match Runtime.opencode_input prompt with
+      | `Prompt _ -> None
+      | `Command (command, arguments) -> (
+          let next, _ = step environment message in
+          match next.screen with
+          | Home.Session (_, { session; _ }) ->
+              Some { session; command; arguments }
+          | Home.Worktrees _ | Home.New_worktree _ | Home.Worktree _
+          | Home.Sessions _ ->
+              None))
+  | (Runtime.Claude _ | Runtime.OpenCode), (Ok _ | Error _) -> None
+
+let complete_opencode_command environment { session; command; arguments } =
+  let result =
+    try
+      Runtime.submit_opencode_command session command arguments;
+      Ok ()
+    with exn -> Error (Printexc.to_string exn)
+  in
+  ignore
+    (dispatch environment
+       (Home.Session_msg (Session.Command_finished (session.id, result))))
+
+let start_opencode_prompt environment body =
+  match (environment, decode body) with
+  | ( Runtime.OpenCode,
+      Ok (Home.Session_msg (Session.Run_prompt prompt) as message) ) -> (
+      match Runtime.opencode_input prompt with
+      | `Prompt _ -> Some (step environment message)
+      | `Command _ -> None)
+  | (Runtime.Claude _ | Runtime.OpenCode), (Ok _ | Error _) -> None
 
 let stream_event environment = function
   | Runtime.Session session_id ->
@@ -169,15 +219,26 @@ let response environment ?(body = "") meth target =
       | Some serial -> screenshot_response serial
       | None -> (`Not_found, "Not Found", "text/plain"))
   | `POST, "/" -> (
-      match decode body with
-      | Error message -> (`Bad_request, message, "text/plain")
-      | Ok message -> (
-          let state, cmd = step environment message in
-          match cmd with
-          | Components.Cmd.Empty ->
-              (`OK, document environment state, "application/json")
-          | Components.Cmd.Run _ ->
-              (`OK, stream_body environment state cmd, "application/x-ndjson")))
+      match start_opencode_prompt environment body with
+      | Some (state, cmd) ->
+          let state =
+            match Components.Cmd.run cmd with
+            | None -> state
+            | Some message -> dispatch environment message
+          in
+          (`OK, document environment state, "application/json")
+      | None -> (
+          match decode body with
+          | Error message -> (`Bad_request, message, "text/plain")
+          | Ok message -> (
+              let state, cmd = step environment message in
+              match cmd with
+              | Components.Cmd.Empty ->
+                  (`OK, document environment state, "application/json")
+              | Components.Cmd.Run _ ->
+                  ( `OK,
+                    stream_body environment state cmd,
+                    "application/x-ndjson" ))))
   | _ -> (`Not_found, "Not Found", "text/plain")
 
 let stream_headers =
@@ -194,7 +255,7 @@ let screenshot_headers body =
       ("cache-control", "no-store");
     ]
 
-let respond environment ~domain_mgr { Gluten.reqd; _ } =
+let respond environment ~net ~sw ~domain_mgr { Gluten.reqd; _ } =
   let request = Httpun.Reqd.request reqd in
   let reply ?headers (status, body, content_type) =
     let headers =
@@ -211,7 +272,7 @@ let respond environment ~domain_mgr { Gluten.reqd; _ } =
       (Httpun.Response.create ~headers status)
       body
   in
-  let stream { agent; cwd; prompt; session_id } =
+  let stream { cwd; prompt; session_id } =
     let writer =
       Httpun.Reqd.respond_with_streaming ~flush_headers_immediately:true reqd
         (Httpun.Response.create ~headers:stream_headers `OK)
@@ -229,8 +290,8 @@ let respond environment ~domain_mgr { Gluten.reqd; _ } =
         (fun () ->
           Eio.Domain_manager.run domain_mgr (fun () ->
               Runtime.with_unix_process (fun () ->
-                  Runtime.stream_prompt agent ~cwd ~prompt ~session_id
-                    (fun event -> Eio.Stream.add updates (`Event event)))))
+                  Runtime.stream_claude ~cwd ~prompt ~session_id (fun event ->
+                      Eio.Stream.add updates (`Event event)))))
         (Eio.Stream.add updates)
     in
     let rec consumer () =
@@ -274,40 +335,74 @@ let respond environment ~domain_mgr { Gluten.reqd; _ } =
     Httpun.Body.Reader.schedule_read
       (Httpun.Reqd.request_body reqd)
       ~on_eof:(fun () ->
+        Runtime.with_opencode_http ~net @@ fun () ->
         let body = Buffer.contents body in
-        match start_prompt_stream environment body with
+        let event_request = request.meth = `POST && request.target = "/" in
+        match
+          if event_request then start_prompt_stream environment body else None
+        with
         | Some request -> stream request
         | None -> (
-            match (request.meth, request.target) with
-            | `GET, "/" ->
+            match
+              if event_request then start_opencode_command environment body
+              else None
+            with
+            | Some { session; command; arguments } ->
+                Eio.Fiber.fork ~sw (fun () ->
+                    Runtime.with_opencode_http ~net (fun () ->
+                        complete_opencode_command environment
+                          { session; command; arguments }));
                 reply
                   ( `OK,
                     document environment (Atomic.get state),
                     "application/json" )
-            | `GET, target -> (
-                match screenshot_serial target with
-                | Some serial -> (
-                    let response =
-                      Eio.Domain_manager.run domain_mgr (fun () ->
-                          Runtime.with_unix_process (fun () ->
-                              screenshot_response serial))
+            | None -> (
+                match
+                  if event_request then start_opencode_prompt environment body
+                  else None
+                with
+                | Some (state, cmd) ->
+                    let state =
+                      match Components.Cmd.run cmd with
+                      | None -> state
+                      | Some message -> dispatch environment message
                     in
-                    match response with
-                    | `OK, body, _ ->
-                        reply ~headers:(screenshot_headers body) response
-                    | _ -> reply response)
-                | None -> reply (`Not_found, "Not Found", "text/plain"))
-            | `POST, "/" -> (
-                match decode body with
-                | Error message -> reply (`Bad_request, message, "text/plain")
-                | Ok message -> (
-                    let state, cmd = step environment message in
-                    match cmd with
-                    | Components.Cmd.Empty ->
+                    reply (`OK, document environment state, "application/json")
+                | None -> (
+                    match (request.meth, request.target) with
+                    | `GET, "/" ->
                         reply
-                          (`OK, document environment state, "application/json")
-                    | Components.Cmd.Run _ -> stream_ui state cmd))
-            | _ -> reply (`Not_found, "Not Found", "text/plain")))
+                          ( `OK,
+                            document environment (Atomic.get state),
+                            "application/json" )
+                    | `GET, target -> (
+                        match screenshot_serial target with
+                        | Some serial -> (
+                            let response =
+                              Eio.Domain_manager.run domain_mgr (fun () ->
+                                  Runtime.with_unix_process (fun () ->
+                                      screenshot_response serial))
+                            in
+                            match response with
+                            | `OK, body, _ ->
+                                reply ~headers:(screenshot_headers body)
+                                  response
+                            | _ -> reply response)
+                        | None -> reply (`Not_found, "Not Found", "text/plain"))
+                    | `POST, "/" -> (
+                        match decode body with
+                        | Error message ->
+                            reply (`Bad_request, message, "text/plain")
+                        | Ok message -> (
+                            let state, cmd = step environment message in
+                            match cmd with
+                            | Components.Cmd.Empty ->
+                                reply
+                                  ( `OK,
+                                    document environment state,
+                                    "application/json" )
+                            | Components.Cmd.Run _ -> stream_ui state cmd))
+                    | _ -> reply (`Not_found, "Not Found", "text/plain")))))
       ~on_read:(fun chunk ~off ~len ->
         Buffer.add_string body (Bigstringaf.substring chunk ~off ~len);
         read ())
@@ -315,7 +410,7 @@ let respond environment ~domain_mgr { Gluten.reqd; _ } =
   read ()
 
 let run environment ~net ~domain_mgr =
-  initialize environment;
+  Runtime.with_opencode_http ~net (fun () -> initialize environment);
   Eio.Switch.run @@ fun sw ->
   let socket =
     Eio.Net.listen ~sw ~reuse_addr:true ~backlog:128 net
@@ -323,7 +418,8 @@ let run environment ~net ~domain_mgr =
   in
   let handler =
     Httpun_eio.Server.create_connection_handler ~sw
-      ~request_handler:(fun _ reqd -> respond environment ~domain_mgr reqd)
+      ~request_handler:(fun _ reqd ->
+        respond environment ~net ~sw ~domain_mgr reqd)
       ~error_handler:(fun _ ?request:_ _ start_response ->
         Httpun.Body.Writer.close (start_response Httpun.Headers.empty))
   in

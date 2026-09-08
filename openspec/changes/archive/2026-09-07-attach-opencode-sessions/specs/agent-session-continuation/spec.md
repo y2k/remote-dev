@@ -1,10 +1,4 @@
-# agent-session-continuation Specification
-
-## Purpose
-
-Keeps consecutive prompts on an open Claude worktree screen in one explicit conversation without persisting backend session state.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Continue the selected worktree session
 In Claude mode the first prompt after opening a worktree SHALL create a new Claude session. Each later prompt submitted while that screen remains open SHALL explicitly resume the same session ID with the same worktree path.

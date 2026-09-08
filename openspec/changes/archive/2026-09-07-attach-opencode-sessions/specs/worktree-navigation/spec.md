@@ -1,10 +1,4 @@
-# worktree-navigation Specification
-
-## Purpose
-
-Определяет возврат из выбранного Claude worktree к списку worktree через единое backend-событие.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Return from a selected worktree
 In Claude mode the backend SHALL handle the Back event while a worktree is selected by returning the worktree-list document with the available worktrees reloaded.

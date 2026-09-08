@@ -1,10 +1,4 @@
-# opencode-cli-execution Specification
-
-## Purpose
-
-Defines the OpenCode server-operation contract for prompts and slash commands submitted to an existing selected session.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Execute an OpenCode prompt non-interactively
 The system SHALL submit an ordinary OpenCode prompt to the exact existing session selected in the UI through the local server's asynchronous prompt operation. It SHALL use the selected session's server-supplied directory and the normal model and agent already associated with the session. The event response SHALL NOT wait for completed text or stream response text to Android.
@@ -39,9 +33,23 @@ When the submitted value after trimming starts with `/` followed by a non-whites
 - **WHEN** OpenCode reports that the submitted slash command is unknown
 - **THEN** the system reports that failure without running a second prompt
 
+## ADDED Requirements
+
 ### Requirement: Report OpenCode server operation failure
 Failure to connect to the OpenCode server or an unsuccessful session operation SHALL produce an ordinary UI error without terminating the backend.
 
 #### Scenario: Prompt submission fails
 - **WHEN** the server rejects a prompt or command submitted for the selected session
 - **THEN** the selected-session screen exposes the failure and the backend remains available
+
+## REMOVED Requirements
+
+### Requirement: Auto-approve OpenCode permission requests
+**Reason**: The backend no longer starts `opencode run --auto`; existing server sessions retain their own configured permission behavior.
+
+**Migration**: Configure permissions in OpenCode or answer pending requests from an attached OpenCode TUI.
+
+### Requirement: Report OpenCode process failure
+**Reason**: OpenCode work is no longer owned by a per-prompt child process.
+
+**Migration**: Treat local server connection and session-operation failures according to `Report OpenCode server operation failure`.

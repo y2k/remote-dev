@@ -133,34 +133,33 @@ module Worktree = struct
     ( { path; prompt = ""; output = None; error = None; session_id = None },
       Cmd.none )
 
-  let view agent { path; prompt; output; error; session_id = _ } :
-      msg Components.t =
+  let view { path; prompt; output; error; session_id = _ } : msg Components.t =
     let messages =
       match output with Some output -> [ text output ] | None -> []
     in
+    let errors =
+      match error with Some error -> [ text ("Error: " ^ error) ] | None -> []
+    in
     let shortcuts =
-      match agent with
-      | Runtime.Claude ->
+      [
+        row
           [
-            row
-              [
-                button ~event:(Set_prompt "/igor-pending-reviews")
-                  "/igor-pending-reviews";
-                button ~event:(Set_prompt "/igor-restart-mr-tests")
-                  "/igor-restart-mr-tests";
-              ];
-          ]
-      | Runtime.OpenCode -> []
+            button ~event:(Set_prompt "/igor-pending-reviews")
+              "/igor-pending-reviews";
+            button ~event:(Set_prompt "/igor-restart-mr-tests")
+              "/igor-restart-mr-tests";
+          ];
+      ]
     in
-    let content =
-      column
-        ([ text "Worktree"; row [ text "Path:"; text path ]; column messages ]
-        @ shortcuts
-        @ [ edit ~text:prompt ~event:(Run_prompt "__VALUE__") "Commands" ])
-    in
-    match error with
-    | None -> content
-    | Some error -> column [ text ("Error: " ^ error); content ]
+    column ~weights:[ 0; 0; 0; 1; 0; 0 ]
+      [
+        column errors;
+        text "Worktree";
+        row [ text "Path:"; text path ];
+        column messages;
+        column shortcuts;
+        edit ~text:prompt ~event:(Run_prompt "__VALUE__") "Commands";
+      ]
 
   let update model = function
     | Clear_error -> ({ model with error = None }, Cmd.none)
@@ -182,6 +181,192 @@ module Worktree = struct
     | Error error -> ({ model with error = Some error }, Cmd.none)
 end
 
+module Sessions = struct
+  type model = {
+    sessions : Runtime.opencode_session list;
+    error : string option;
+  }
+
+  open Result_yojson
+
+  type msg =
+    | Load
+    | Loaded of (Runtime.opencode_session list, string) result
+    | Select of string
+    | Error of string
+  [@@deriving yojson]
+
+  let status = function
+    | Runtime.Idle -> "idle"
+    | Runtime.Busy -> "busy"
+    | Runtime.Retry message -> "retry: " ^ message
+
+  let view { sessions; error } : msg Components.t =
+    let errors =
+      match error with Some error -> [ text ("Error: " ^ error) ] | None -> []
+    in
+    let sessions =
+      match sessions with
+      | [] -> [ text "No OpenCode sessions" ]
+      | sessions ->
+          List.map
+            (fun (session : Runtime.opencode_session) ->
+              column
+                [
+                  button ~event:(Select session.id) session.title;
+                  text session.directory;
+                  text ("Status: " ^ status session.status);
+                ])
+            sessions
+    in
+    column ~weights:[ 0; 0; 1 ]
+      [ column errors; text "OpenCode sessions:"; column sessions ]
+
+  let load : msg Cmd.t =
+    Cmd.Run
+      (fun () ->
+        try Some (Loaded (Ok (Runtime.load_opencode_sessions ())))
+        with exn -> Some (Loaded (Error (Printexc.to_string exn))))
+
+  let init () = ({ sessions = []; error = None }, load)
+
+  let update model = function
+    | Load -> ({ model with error = None }, load)
+    | Loaded (Ok sessions) -> ({ sessions; error = None }, Cmd.none)
+    | Loaded (Error error) -> ({ model with error = Some error }, Cmd.none)
+    | Select _ -> (model, Cmd.none)
+    | Error error -> ({ model with error = Some error }, Cmd.none)
+end
+
+module Session = struct
+  type model = {
+    session : Runtime.opencode_session;
+    messages : Runtime.opencode_message list;
+    needs_input : bool;
+    prompt : string;
+    error : string option;
+    background_error : string option;
+  }
+
+  open Result_yojson
+
+  type msg =
+    | Load
+    | Loaded of (Runtime.opencode_detail, string) result
+    | Missing
+    | Run_prompt of string
+    | Submitted of (unit, string) result
+    | Stop
+    | Command_finished of string * (unit, string) result
+    | Error of string
+  [@@deriving yojson]
+
+  let load session : msg Cmd.t =
+    Cmd.Run
+      (fun () ->
+        try Some (Loaded (Ok (Runtime.load_opencode_detail session))) with
+        | Runtime.OpenCode_not_found -> Some Missing
+        | exn -> Some (Loaded (Error (Printexc.to_string exn))))
+
+  let init session =
+    ( {
+        session;
+        messages = [];
+        needs_input = false;
+        prompt = "";
+        error = None;
+        background_error = None;
+      },
+      load session )
+
+  let status = function
+    | Runtime.Idle -> "idle"
+    | Runtime.Busy -> "busy"
+    | Runtime.Retry message -> "retry: " ^ message
+
+  let view { session; messages; needs_input; prompt; error; background_error } :
+      msg Components.t =
+    let errors =
+      [ error; background_error ]
+      |> List.filter_map (Option.map (fun error -> text ("Error: " ^ error)))
+    in
+    let messages =
+      List.map
+        (fun ({ Runtime.role; text = value } : Runtime.opencode_message) ->
+          text
+            ((match role with
+               | Runtime.User -> "User: "
+               | Runtime.Assistant -> "Assistant: ")
+            ^ value))
+        messages
+    in
+    let pending =
+      if needs_input then [ text "Needs input in OpenCode" ] else []
+    in
+    let stop =
+      match session.status with
+      | Runtime.Busy -> [ button ~event:Stop "Stop" ]
+      | Runtime.Idle | Runtime.Retry _ -> []
+    in
+    column ~weights:[ 0; 0; 0; 0; 0; 1; 0; 0 ]
+      [
+        column errors;
+        text "OpenCode session";
+        text session.title;
+        text session.directory;
+        text ("Status: " ^ status session.status);
+        column messages;
+        column (pending @ stop);
+        edit ~text:prompt ~event:(Run_prompt "__VALUE__") "Prompt";
+      ]
+
+  let update model = function
+    | Load -> ({ model with error = None }, load model.session)
+    | Loaded (Ok detail) ->
+        ( {
+            model with
+            session = detail.session;
+            messages = detail.messages;
+            needs_input = detail.needs_input;
+            error = None;
+          },
+          Cmd.none )
+    | Loaded (Error error) -> ({ model with error = Some error }, Cmd.none)
+    | Missing -> (model, Cmd.none)
+    | Run_prompt prompt -> (
+        match Runtime.opencode_input prompt with
+        | `Prompt prompt ->
+            ( { model with prompt; error = None; background_error = None },
+              Cmd.Run
+                (fun () ->
+                  try
+                    Runtime.submit_opencode_prompt model.session prompt;
+                    Some (Submitted (Ok ()))
+                  with exn ->
+                    Some (Submitted (Error (Printexc.to_string exn)))) )
+        | `Command _ ->
+            ( { model with prompt = ""; error = None; background_error = None },
+              Cmd.none ))
+    | Submitted (Ok ()) -> ({ model with prompt = ""; error = None }, Cmd.none)
+    | Submitted (Error error) -> ({ model with error = Some error }, Cmd.none)
+    | Stop ->
+        ( { model with error = None; background_error = None },
+          Cmd.Run
+            (fun () ->
+              try
+                Runtime.abort_opencode model.session;
+                Some (Loaded (Ok (Runtime.load_opencode_detail model.session)))
+              with
+              | Runtime.OpenCode_not_found -> Some Missing
+              | exn -> Some (Loaded (Error (Printexc.to_string exn)))) )
+    | Command_finished (id, Ok ()) when id = model.session.id ->
+        (model, Cmd.none)
+    | Command_finished (id, Error error) when id = model.session.id ->
+        ({ model with background_error = Some error }, Cmd.none)
+    | Command_finished _ -> (model, Cmd.none)
+    | Error error -> ({ model with error = Some error }, Cmd.none)
+end
+
 module Worktrees = struct
   type model = { worktrees : Runtime.worktree list; error : string option }
 
@@ -195,23 +380,18 @@ module Worktrees = struct
     | Error of string
   [@@deriving yojson]
 
-  let view agent { worktrees; error } : msg Components.t =
+  let view { worktrees; error } : msg Components.t =
+    let errors =
+      match error with Some error -> [ text ("Error: " ^ error) ] | None -> []
+    in
     let worktrees =
       worktrees
       |> List.map (fun (w : Runtime.worktree) ->
           column [ text w.path; button ~event:(Select w.path) w.branch ])
     in
-    let creation =
-      match agent with
-      | Runtime.Claude -> [ button ~event:Open_creation "New" ]
-      | Runtime.OpenCode -> []
-    in
-    let content =
-      column ([ text "Worktrees:" ] @ creation @ [ column worktrees ])
-    in
-    match error with
-    | None -> content
-    | Some error -> column [ text ("Error: " ^ error); content ]
+    let creation = [ button ~event:Open_creation "New" ] in
+    column ~weights:[ 0; 0; 0; 1 ]
+      [ column errors; text "Worktrees:"; column creation; column worktrees ]
 
   let load root : msg Cmd.t =
     Cmd.Run

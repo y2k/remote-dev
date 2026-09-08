@@ -1,25 +1,40 @@
 package io.y2k.remote_client
 
 import android.graphics.Bitmap
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.io.ByteArrayOutputStream
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Rule
 import org.junit.Test
@@ -72,6 +87,18 @@ class BackendUiParserTest {
             ),
         )
         assertEquals(
+            UiNode.Row(listOf(UiNode.Text("Fixed"), UiNode.Text("Rest")), listOf(0f, 1f)),
+            parseUiNode(
+                """{"@type":"row","children":[{"@type":"text","text":"Fixed"},{"@type":"text","text":"Rest"}],"weights":[0,1]}"""
+            ),
+        )
+        assertEquals(
+            UiNode.Column(listOf(UiNode.Text("Fixed"), UiNode.Text("Rest")), listOf(0f, 1f)),
+            parseUiNode(
+                """{"@type":"column","children":[{"@type":"text","text":"Fixed"},{"@type":"text","text":"Rest"}],"weights":[0,1]}"""
+            ),
+        )
+        assertEquals(
             UiNode.Image("/emulators/emulator-5554/screenshot.png", "Pixel"),
             parseUiNode(
                 """{"@type":"image","src":"/emulators/emulator-5554/screenshot.png","label":"Pixel"}"""
@@ -87,7 +114,12 @@ class BackendUiParserTest {
                 """{"@type":"row","children":[],"weights":{}}""",
                 """{"@type":"row","children":[{"@type":"text","text":"Left"},{"@type":"text","text":"Right"}],"weights":[1]}""",
                 """{"@type":"row","children":[{"@type":"text","text":"Left"},{"@type":"text","text":"Right"}],"weights":[1,"bad"]}""",
-                """{"@type":"row","children":[{"@type":"text","text":"Left"},{"@type":"text","text":"Right"}],"weights":[1,0]}""",
+                """{"@type":"row","children":[{"@type":"text","text":"Left"},{"@type":"text","text":"Right"}],"weights":[1,-1]}""",
+                """{"@type":"row","children":[{"@type":"text","text":"Left"},{"@type":"text","text":"Right"}],"weights":[1,1e400]}""",
+                """{"@type":"column","children":[],"weights":{}}""",
+                """{"@type":"column","children":[{"@type":"text","text":"Only"}],"weights":[]}""",
+                """{"@type":"column","children":[{"@type":"text","text":"Only"}],"weights":["bad"]}""",
+                """{"@type":"column","children":[{"@type":"text","text":"Only"}],"weights":[-1]}""",
                 """{"@type":"button","label":"Event","event":"not-an-object"}""",
                 """{"@type":"input","event":{"type":"input"}}""",
                 """{"@type":"input","label":1,"event":{"type":"input"}}""",
@@ -122,12 +154,11 @@ class BackendUiParserTest {
         assertEquals("draft", request.getString("value"))
         assertEquals(
             true,
-            JSONObject(eventRequest(UiEvent("[\"Worktrees_msg\",[\"Load\"]]"), null))
-                .isNull("value"),
+            JSONObject(eventRequest(refreshEvent, null)).isNull("value"),
         )
         assertEquals(
             true,
-            JSONObject(eventRequest(UiEvent("[\"Worktrees_msg\",[\"Load\"]]"), null)).has("value"),
+            JSONObject(eventRequest(refreshEvent, null)).has("value"),
         )
     }
 
@@ -342,6 +373,186 @@ class BackendUiParserTest {
                 .boundsInRoot
                 .width
         assertEquals(2f, left / right, 0.01f)
+    }
+
+    @Test
+    fun weightedRowKeepsZeroWeightChildContentSized() {
+        composeRule.setContent {
+            Box(Modifier.width(300.dp).testTag("weighted-row")) {
+                UiNodeContent(
+                    UiNode.Row(
+                        listOf(
+                            UiNode.Text("Fixed"),
+                            UiNode.Image("/rest.png", "Rest"),
+                        ),
+                        listOf(0f, 1f),
+                    ),
+                    {},
+                    { _, _ -> },
+                    false,
+                    loadImage = { ImageBitmap(1, 1) },
+                )
+            }
+        }
+
+        val row = composeRule.onNodeWithTag("weighted-row").fetchSemanticsNode().boundsInRoot
+        val fixed = composeRule.onNodeWithText("Fixed").fetchSemanticsNode().boundsInRoot
+        val rest =
+            composeRule.onNodeWithContentDescription("Rest").fetchSemanticsNode().boundsInRoot
+        assertTrue(fixed.width < rest.width)
+        assertEquals(row.right, rest.right, 1f)
+    }
+
+    @Test
+    fun weightedColumnUsesProportionalHeights() {
+        val overflowing = UiNode.Column(List(100) { UiNode.Text("Line $it") })
+        composeRule.setContent {
+            Box(Modifier.height(300.dp)) {
+                UiNodeContent(
+                    UiNode.Column(
+                        listOf(overflowing, overflowing),
+                        listOf(2f, 1f),
+                    ),
+                    {},
+                    { _, _ -> },
+                    false,
+                )
+            }
+        }
+
+        val regions = composeRule.onAllNodes(hasScrollAction()).fetchSemanticsNodes()
+        assertEquals(2, regions.size)
+        val heights = regions.map { it.boundsInRoot.height }.sortedDescending()
+        assertEquals(2f, heights[0] / heights[1], 0.05f)
+    }
+
+    @Test
+    fun weightedColumnScrollsOutputWithoutMovingControls() {
+        val output = UiNode.Column(List(100) { UiNode.Text("Output $it") })
+        composeRule.setContent {
+            Box(Modifier.height(300.dp)) {
+                UiNodeContent(
+                    UiNode.Column(
+                        listOf(
+                            UiNode.Text("Worktree"),
+                            output,
+                            UiNode.Input("Commands", UiEvent("[\"Run\"]")),
+                        ),
+                        listOf(0f, 1f, 0f),
+                    ),
+                    {},
+                    { _, _ -> },
+                    false,
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Worktree").assertIsDisplayed()
+        composeRule.onNodeWithTag("input").assertIsDisplayed()
+        composeRule.onNode(hasScrollAction()).performScrollToNode(hasText("Output 99"))
+        composeRule.onNodeWithText("Output 99").assertIsDisplayed()
+        composeRule.onNodeWithTag("input").assertIsDisplayed()
+    }
+
+    @Test
+    fun rootSplitKeepsWorktreeInputVisibleWithOverflowingOutput() {
+        val worktree =
+            UiNode.Column(
+                listOf(
+                    UiNode.Text("Worktree"),
+                    UiNode.Column(List(100) { UiNode.Text("Root output $it") }),
+                    UiNode.Input("Commands", UiEvent("[\"Run\"]")),
+                ),
+                listOf(0f, 1f, 0f),
+            )
+        composeRule.setContent {
+            Box(Modifier.width(600.dp).height(300.dp)) {
+                UiNodeContent(
+                    UiNode.Row(
+                        listOf(
+                            UiNode.Column(listOf(UiNode.Text("Agent: Claude"), worktree)),
+                            UiNode.Column(listOf(UiNode.Text("Emulators"))),
+                        ),
+                        listOf(2f, 1f),
+                    ),
+                    {},
+                    { _, _ -> },
+                    false,
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Agent: Claude").assertIsDisplayed()
+        composeRule.onNodeWithText("Emulators").assertIsDisplayed()
+        composeRule.onNodeWithTag("input").assertIsDisplayed()
+        assertEquals(1, composeRule.onAllNodes(hasScrollAction()).fetchSemanticsNodes().size)
+    }
+
+    @Test
+    fun boundedContentSupportsPullToRefresh() {
+        var refreshed = false
+        composeRule.setContent {
+            RefreshableColumn(
+                isRefreshing = false,
+                onRefresh = { refreshed = true },
+                modifier = Modifier.fillMaxSize().testTag("refresh"),
+            ) {
+                Box(Modifier.weight(1f)) {
+                    UiNodeContent(UiNode.Text("Content"), {}, { _, _ -> }, false)
+                }
+            }
+        }
+
+        composeRule.onNodeWithTag("refresh").performTouchInput { swipeDown() }
+        composeRule.runOnIdle { assertTrue(refreshed) }
+    }
+
+    @Test
+    fun refreshMenuInvokesRootRefreshAction() {
+        var refreshed = false
+        composeRule.setContent { RefreshMenu { refreshed = true } }
+
+        composeRule.onNodeWithText("Refresh").performClick()
+
+        composeRule.runOnIdle { assertTrue(refreshed) }
+    }
+
+    @Test
+    fun weightedContentScrollsAndSupportsPullToRefreshAtStart() {
+        var refreshed = false
+        val output = UiNode.Column(List(100) { UiNode.Text("Refresh output $it") })
+        composeRule.setContent {
+            RefreshableColumn(
+                isRefreshing = false,
+                onRefresh = { refreshed = true },
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                Box(Modifier.weight(1f)) {
+                    UiNodeContent(
+                        UiNode.Column(
+                            listOf(output, UiNode.Input("Commands", UiEvent("[\"Run\"]"))),
+                            listOf(1f, 0f),
+                        ),
+                        {},
+                        { _, _ -> },
+                        false,
+                    )
+                }
+            }
+        }
+
+        val outputScroll =
+            composeRule.onNode(
+                hasScrollAction() and
+                    hasAnyDescendant(hasText("Refresh output 0")) and
+                    hasAnyDescendant(hasText("Commands")).not()
+            )
+        outputScroll.performScrollToNode(hasText("Refresh output 99"))
+        composeRule.onNodeWithText("Refresh output 99").assertIsDisplayed()
+        outputScroll.performScrollToNode(hasText("Refresh output 0"))
+        outputScroll.performTouchInput { swipeDown() }
+        composeRule.runOnIdle { assertTrue(refreshed) }
+        composeRule.onNodeWithTag("input").assertIsDisplayed()
     }
 
     @Test

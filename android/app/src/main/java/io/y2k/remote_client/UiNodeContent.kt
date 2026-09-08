@@ -5,7 +5,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -39,9 +42,36 @@ fun UiNodeContent(
 ) {
     when (node) {
         is UiNode.Column ->
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                node.children.forEach {
-                    UiNodeContent(it, onButtonEvent, onInputEvent, eventInProgress, loadImage)
+            Column(
+                modifier = if (node.weights == null) Modifier else Modifier.fillMaxHeight(),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (node.weights == null) {
+                    node.children.forEach {
+                        UiNodeContent(it, onButtonEvent, onInputEvent, eventInProgress, loadImage)
+                    }
+                } else {
+                    node.children.zip(node.weights).forEach { (child, weight) ->
+                        if (weight == 0f) {
+                            UiNodeContent(
+                                child,
+                                onButtonEvent,
+                                onInputEvent,
+                                eventInProgress,
+                                loadImage,
+                            )
+                        } else {
+                            Box(Modifier.weight(weight).verticalScroll(rememberScrollState())) {
+                                UiNodeContent(
+                                    child,
+                                    onButtonEvent,
+                                    onInputEvent,
+                                    eventInProgress,
+                                    loadImage,
+                                )
+                            }
+                        }
+                    }
                 }
             }
         is UiNode.Row ->
@@ -55,7 +85,7 @@ fun UiNodeContent(
                     }
                 } else {
                     node.children.zip(node.weights).forEach { (child, weight) ->
-                        Box(Modifier.weight(weight)) {
+                        if (weight == 0f) {
                             UiNodeContent(
                                 child,
                                 onButtonEvent,
@@ -63,6 +93,16 @@ fun UiNodeContent(
                                 eventInProgress,
                                 loadImage,
                             )
+                        } else {
+                            Box(Modifier.weight(weight)) {
+                                UiNodeContent(
+                                    child,
+                                    onButtonEvent,
+                                    onInputEvent,
+                                    eventInProgress,
+                                    loadImage,
+                                )
+                            }
                         }
                     }
                 }

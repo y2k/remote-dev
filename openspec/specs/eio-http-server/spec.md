@@ -22,15 +22,23 @@ The system SHALL serve the current initial UI through `GET /` on port `8080` wit
 - **THEN** the system returns `404 Not Found`
 
 ### Requirement: In-memory UI state
-The system SHALL maintain one confirmed UI state in server memory for its single local client. It SHALL initialize that state to the loaded worktree list before accepting HTTP requests and SHALL discard it when the server stops. A `load` event SHALL return the current state, including refreshed dynamic worktree data when that state displays the worktree list.
+The system SHALL maintain one confirmed UI state in server memory for its single local client. Before accepting HTTP requests, it SHALL initialize that state to the loaded worktree list in Claude mode or the loaded OpenCode session list in OpenCode mode, and it SHALL discard the state when the server stops. A `Refresh` event SHALL reload dynamic data for the current provider-specific root or detail screen.
 
 #### Scenario: Select a worktree
-- **WHEN** the current UI session displays the worktree list and the client sends an advertised worktree-selection event
+- **WHEN** the backend runs in Claude mode, the current UI session displays the worktree list, and the client sends an advertised worktree-selection event
 - **THEN** the system changes its current UI state to that worktree's UI and returns it
+
+#### Scenario: Select an OpenCode session
+- **WHEN** the backend runs in OpenCode mode, the current UI session displays the session list, and the client sends an advertised session-selection event
+- **THEN** the system changes its current UI state to that session's UI and returns it
+
+#### Scenario: Refresh the current screen
+- **WHEN** the client sends `Refresh`
+- **THEN** the system reloads dynamic data for the current provider-specific root or detail screen and returns the resulting UI document
 
 #### Scenario: Server restarts
 - **WHEN** the server starts after a previous process has stopped
-- **THEN** it loads the worktree list before accepting requests and does not retain the previous UI state
+- **THEN** it loads the selected provider's root screen before accepting requests and does not retain the previous UI state
 
 ### Requirement: Advertise backend-defined events
 The system SHALL advertise an event object on each interactive UI node that performs an action. A worktree button's event object SHALL identify the worktree path to select. An input node's event object SHALL identify the command submission action. The system SHALL interpret an input event's string `value` as the submitted text.

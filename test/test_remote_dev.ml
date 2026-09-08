@@ -1,19 +1,34 @@
 module J = Yojson.Safe
+
+[@@@warning "-8"]
+
 module Cmd = Remote_dev.Components.Cmd
 module Home_components = Remote_dev.Home_components
 module Result_yojson = Remote_dev.Result_yojson
 
 let claude_environment : Remote_dev.Runtime.environment =
-  { agent = Remote_dev.Runtime.Claude; root = "/tmp/remote-dev-root" }
+  Remote_dev.Runtime.Claude { root = "/tmp/remote-dev-root" }
 
 let opencode_environment : Remote_dev.Runtime.environment =
-  { agent = Remote_dev.Runtime.OpenCode; root = "/tmp/remote-dev-root" }
+  Remote_dev.Runtime.OpenCode
 
 let with_process f =
   try f ()
   with effect Remote_dev.Runtime.Process_lines (_, on_line), k ->
     List.iter on_line [ "worktree /tmp/remote-dev"; "branch refs/heads/main" ];
     Effect.Deep.continue k (Unix.WEXITED 0)
+
+let with_http
+    (handle :
+      Remote_dev.Runtime.http_request -> Remote_dev.Runtime.http_response) f =
+  try f ()
+  with effect Remote_dev.Runtime.Http_request request, k ->
+    Effect.Deep.continue k (handle request)
+
+let with_http_failure f =
+  try f ()
+  with effect Remote_dev.Runtime.Http_request _, k ->
+    Effect.Deep.discontinue k (Failure "offline")
 
 let with_created_worktree f =
   try f ()
@@ -115,6 +130,22 @@ let () =
     | `List values -> List.exists (has_text text) values
     | _ -> false
   in
+  let rec find_weighted_column weights = function
+    | `Assoc fields ->
+        if
+          List.assoc_opt "@type" fields = Some (`String "column")
+          && List.assoc_opt "weights" fields = Some weights
+        then
+          match List.assoc_opt "children" fields with
+          | Some (`List children) -> Some children
+          | _ -> None
+        else
+          List.find_map
+            (fun (_, value) -> find_weighted_column weights value)
+            fields
+    | `List values -> List.find_map (find_weighted_column weights) values
+    | _ -> None
+  in
   let root_panes = function
     | `Assoc fields -> (
         match
@@ -174,6 +205,31 @@ let () =
                         ] );
                   ];
               ] );
+        ]);
+  assert (
+    Remote_dev.Components.to_json App.encode
+      (Remote_dev.Components.map
+         (fun event -> App.Todo event)
+         (Remote_dev.Components.column ~weights:[ 0; 1 ]
+            [
+              Remote_dev.Components.button ~event:Todo.Submit "Button";
+              Remote_dev.Components.text "Output";
+            ]))
+    = `Assoc
+        [
+          ("@type", `String "column");
+          ( "children",
+            `List
+              [
+                `Assoc
+                  [
+                    ("@type", `String "button");
+                    ("label", `String "Button");
+                    ("event", `Assoc [ ("type", `String "todo") ]);
+                  ];
+                `Assoc [ ("@type", `String "text"); ("text", `String "Output") ];
+              ] );
+          ("weights", `List [ `Int 0; `Int 1 ]);
         ]);
   assert (
     Remote_dev.Components.to_json App.encode
@@ -256,7 +312,7 @@ let () =
   let initial_emulator = Home_components.Emulator.init () |> fst in
   let initial_new_worktree = Home_components.New_worktree.init () |> fst in
   let initial_worktrees =
-    Home_components.Worktrees.init claude_environment.root |> fst
+    Home_components.Worktrees.init "/tmp/remote-dev-root" |> fst
   in
   let initial_worktree path = Home_components.Worktree.init path |> fst in
   let worktrees_document ?(environment = claude_environment)
@@ -305,6 +361,22 @@ let () =
       error = None;
     }
   in
+  (match
+     find_weighted_column
+       (`List [ `Int 0; `Int 0; `Int 0; `Int 1 ])
+       (worktrees_document listed_worktree)
+   with
+  | Some [ errors; heading; creation; worktrees ] ->
+      assert (not (has_text "Error: failed" errors));
+      assert (has_text "Worktrees:" heading);
+      assert (has_text "/tmp/clicked" worktrees);
+      assert (
+        has_event
+          (home_event
+             (Remote_dev.Home.Worktrees_msg
+                Home_components.Worktrees.Open_creation))
+          creation)
+  | _ -> assert false);
   assert_root_split
     (worktrees_document ~emulator:selected_emulator listed_worktree)
     "Worktrees:" (fun right ->
@@ -314,6 +386,39 @@ let () =
     "New worktree" (fun right ->
       assert (has_image "/emulators/emulator-5554/screenshot.png" right));
   let worktree = initial_worktree "/tmp/clicked" in
+  let assert_worktree_layout ?output ?error ~shortcuts document =
+    match
+      find_weighted_column
+        (`List [ `Int 0; `Int 0; `Int 0; `Int 1; `Int 0; `Int 0 ])
+        document
+    with
+    | Some [ errors; heading; path; messages; shortcut_buttons; input ] ->
+        assert (has_text "Worktree" heading);
+        assert (has_text "/tmp/clicked" path);
+        assert (
+          has_event
+            (home_event
+               (Remote_dev.Home.Worktree_msg
+                  (Home_components.Worktree.Run_prompt "__VALUE__")))
+            input);
+        Option.iter (fun value -> assert (has_text value messages)) output;
+        Option.iter
+          (fun value -> assert (has_text ("Error: " ^ value) errors))
+          error;
+        assert (
+          shortcuts
+          = has_event
+              (home_event
+                 (Remote_dev.Home.Worktree_msg
+                    (Home_components.Worktree.Set_prompt "/igor-pending-reviews")))
+              shortcut_buttons)
+    | _ -> assert false
+  in
+  assert_worktree_layout ~shortcuts:true (worktree_document worktree);
+  assert_worktree_layout ~output:"long output" ~shortcuts:true
+    (worktree_document { worktree with output = Some "long output" });
+  assert_worktree_layout ~error:"failed" ~shortcuts:true
+    (worktree_document { worktree with error = Some "failed" });
   assert_root_split (worktree_document ~emulator:selected_emulator worktree)
     "Worktree" (fun right ->
       assert (has_image "/emulators/emulator-5554/screenshot.png" right));
@@ -342,54 +447,311 @@ let () =
       creation_document listed_worktree;
       worktree_document worktree;
     ];
-  List.iter
-    (fun document ->
-      assert (has_text "Agent: OpenCode" document);
-      assert (not (has_text "Agent: Claude" document)))
-    [
-      worktrees_document ~environment:opencode_environment listed_worktree;
-      creation_document ~environment:opencode_environment listed_worktree;
-      worktree_document ~environment:opencode_environment worktree;
-    ];
-  assert (
-    not
-      (has_event
-         (home_event
-            (Remote_dev.Home.Worktrees_msg
-               Home_components.Worktrees.Open_creation))
-         (worktrees_document ~environment:opencode_environment listed_worktree)));
-  assert (
-    not
-      (has_event
-         (home_event
-            (Remote_dev.Home.Worktree_msg
-               (Home_components.Worktree.Set_prompt "/igor-pending-reviews")))
-         (worktree_document ~environment:opencode_environment worktree)));
-  assert (
-    not
-      (has_event
-         (home_event
-            (Remote_dev.Home.Worktree_msg
-               (Home_components.Worktree.Set_prompt "/igor-restart-mr-tests")))
-         (worktree_document ~environment:opencode_environment worktree)));
-  let opencode_home =
-    {
-      Remote_dev.Home.screen = Remote_dev.Home.Worktrees listed_worktree;
-      emulator = initial_emulator;
-    }
-  in
-  let unchanged, cmd =
-    Remote_dev.Home.update opencode_environment opencode_home
-      (Remote_dev.Home.Worktrees_msg Home_components.Worktrees.Open_creation)
-  in
-  assert (unchanged = opencode_home);
-  assert (Cmd.run cmd = None);
   assert (
     has_event
       (home_event
          (Remote_dev.Home.Worktree_msg
             (Home_components.Worktree.Run_prompt "__VALUE__")))
       (worktree_document worktree));
+  let idle_session : Remote_dev.Runtime.opencode_session =
+    {
+      id = "idle";
+      title = "Idle session";
+      directory = "/tmp/idle";
+      workspace = None;
+      agent = Some "build";
+      model = Some ("anthropic", "claude", None);
+      status = Idle;
+    }
+  in
+  let busy_session : Remote_dev.Runtime.opencode_session =
+    {
+      id = "busy";
+      title = "Busy session";
+      directory = "/tmp/busy";
+      workspace = None;
+      agent = Some "build";
+      model = Some ("anthropic", "claude", None);
+      status = Busy;
+    }
+  in
+  let retry_session : Remote_dev.Runtime.opencode_session =
+    {
+      id = "retry";
+      title = "Retry session";
+      directory = "/tmp/retry";
+      workspace = None;
+      agent = Some "build";
+      model = Some ("anthropic", "claude", None);
+      status = Retry "backoff";
+    }
+  in
+  let sessions_model : Home_components.Sessions.model =
+    { sessions = [ idle_session; busy_session; retry_session ]; error = None }
+  in
+  let sessions_home =
+    {
+      Remote_dev.Home.screen = Remote_dev.Home.Sessions sessions_model;
+      emulator = initial_emulator;
+    }
+  in
+  let sessions_document =
+    Remote_dev.Server.to_json opencode_environment sessions_home
+  in
+  assert (has_text "Agent: OpenCode" sessions_document);
+  assert (has_text "Status: idle" sessions_document);
+  assert (has_text "Status: busy" sessions_document);
+  assert (has_text "Status: retry: backoff" sessions_document);
+  assert (not (has_text "Worktrees:" sessions_document));
+  assert (not (has_text "New worktree" sessions_document));
+  assert (
+    has_event
+      (home_event
+         (Remote_dev.Home.Sessions_msg (Home_components.Sessions.Select "busy")))
+      sessions_document);
+  let empty_sessions =
+    Remote_dev.Server.to_json opencode_environment
+      {
+        Remote_dev.Home.screen =
+          Remote_dev.Home.Sessions { sessions = []; error = None };
+        emulator = initial_emulator;
+      }
+  in
+  assert (has_text "No OpenCode sessions" empty_sessions);
+  let failed_sessions, cmd =
+    Home_components.Sessions.update sessions_model
+      (Home_components.Sessions.Loaded (Error "offline"))
+  in
+  assert (Cmd.run cmd = None);
+  assert (failed_sessions.error = Some "offline");
+  let selected_home, load =
+    Remote_dev.Home.update opencode_environment sessions_home
+      (Remote_dev.Home.Sessions_msg (Home_components.Sessions.Select "busy"))
+  in
+  assert (match load with Cmd.Run _ -> true | Cmd.Empty -> false);
+  let selected_model =
+    match selected_home.screen with
+    | Remote_dev.Home.Session (_, model) -> model
+    | _ -> assert false
+  in
+  let loaded_model =
+    {
+      selected_model with
+      messages =
+        [
+          { Remote_dev.Runtime.role = User; text = "question" };
+          { role = Assistant; text = "answer" };
+        ];
+      needs_input = true;
+    }
+  in
+  let selected_home =
+    {
+      selected_home with
+      screen = Remote_dev.Home.Session (sessions_model, loaded_model);
+    }
+  in
+  let selected_document =
+    Remote_dev.Server.to_json opencode_environment selected_home
+  in
+  assert (has_text "User: question" selected_document);
+  assert (has_text "Assistant: answer" selected_document);
+  assert (has_text "Needs input in OpenCode" selected_document);
+  assert (
+    Option.is_some
+      (find_weighted_column
+         (`List
+            [ `Int 0; `Int 0; `Int 0; `Int 0; `Int 0; `Int 1; `Int 0; `Int 0 ])
+         selected_document));
+  assert (
+    has_event
+      (home_event (Remote_dev.Home.Session_msg Home_components.Session.Stop))
+      selected_document);
+  let retry_document =
+    Remote_dev.Server.to_json opencode_environment
+      {
+        selected_home with
+        screen =
+          Remote_dev.Home.Session
+            ( sessions_model,
+              { loaded_model with session = retry_session; needs_input = false }
+            );
+      }
+  in
+  assert (has_text "Status: retry: backoff" retry_document);
+  assert (
+    not
+      (has_event
+         (home_event (Remote_dev.Home.Session_msg Home_components.Session.Stop))
+         retry_document));
+  let initial_opencode, _ = Remote_dev.Home.init opencode_environment in
+  assert (
+    match initial_opencode.screen with
+    | Remote_dev.Home.Sessions { sessions = []; error = None } -> true
+    | _ -> false);
+  let listed, cmd =
+    Remote_dev.Home.update opencode_environment selected_home
+      Remote_dev.Home.Back
+  in
+  assert (Cmd.run cmd = None);
+  assert (listed = sessions_home);
+  let _, refresh =
+    Remote_dev.Home.update opencode_environment sessions_home
+      Remote_dev.Home.Refresh
+  in
+  assert (match refresh with Cmd.Run _ -> true | Cmd.Empty -> false);
+  let _, refresh =
+    Remote_dev.Home.update opencode_environment selected_home
+      Remote_dev.Home.Refresh
+  in
+  assert (match refresh with Cmd.Run _ -> true | Cmd.Empty -> false);
+  let missing, cmd =
+    Remote_dev.Home.update opencode_environment selected_home
+      (Remote_dev.Home.Session_msg Home_components.Session.Missing)
+  in
+  assert (Cmd.run cmd = None);
+  assert (
+    match missing.screen with
+    | Remote_dev.Home.Sessions { error = Some _; _ } -> true
+    | _ -> false);
+  Atomic.set Remote_dev.Server.state selected_home;
+  let prompt_body =
+    request_body
+      (Remote_dev.Home.Session_msg
+         (Home_components.Session.Run_prompt "$(literal); \"quoted\""))
+  in
+  let status, body, content_type =
+    with_http
+      (fun (request : Remote_dev.Runtime.http_request) ->
+        assert (request.meth = `POST);
+        assert (String.ends_with ~suffix:"/prompt_async" request.target);
+        assert (String.contains request.body '$');
+        { status = 204; body = "" })
+      (fun () ->
+        Remote_dev.Server.response opencode_environment ~body:prompt_body `POST
+          "/")
+  in
+  assert (status = `OK);
+  assert (content_type = "application/json");
+  assert (has_text "Busy session" (J.from_string body));
+  assert (
+    match (Atomic.get Remote_dev.Server.state).screen with
+    | Remote_dev.Home.Session (_, { prompt = ""; error = None; _ }) -> true
+    | _ -> false);
+  Atomic.set Remote_dev.Server.state selected_home;
+  let status, body, _ =
+    with_http_failure (fun () ->
+        Remote_dev.Server.response opencode_environment ~body:prompt_body `POST
+          "/")
+  in
+  assert (status = `OK);
+  assert (has_text "Error: Failure(\"offline\")" (J.from_string body));
+  Atomic.set Remote_dev.Server.state selected_home;
+  let status, body, content_type =
+    with_http
+      (fun (request : Remote_dev.Runtime.http_request) ->
+        if request.meth = `POST then { status = 200; body = "true" }
+        else if
+          String.starts_with ~prefix:"/session/busy/message" request.target
+        then { status = 200; body = "[]" }
+        else if String.starts_with ~prefix:"/session/status" request.target then
+          { status = 200; body = "{}" }
+        else { status = 200; body = "[]" })
+      (fun () ->
+        Remote_dev.Server.response opencode_environment
+          ~body:
+            (request_body
+               (Remote_dev.Home.Session_msg Home_components.Session.Stop))
+          `POST "/")
+  in
+  assert (status = `OK);
+  assert (content_type = "application/x-ndjson");
+  assert (List.length (stream_documents body) = 2);
+  assert (
+    match (Atomic.get Remote_dev.Server.state).screen with
+    | Remote_dev.Home.Session (_, { session = { status = Idle; _ }; _ }) -> true
+    | _ -> false);
+  Atomic.set Remote_dev.Server.state selected_home;
+  let command_request =
+    match
+      Remote_dev.Server.start_opencode_command opencode_environment
+        (request_body
+           (Remote_dev.Home.Session_msg
+              (Home_components.Session.Run_prompt "/review main branch")))
+    with
+    | Some { session; command; arguments } ->
+        assert (session.id = "busy");
+        assert (command = "review");
+        assert (arguments = "main branch");
+        { Remote_dev.Server.session; command; arguments }
+    | None -> assert false
+  in
+  Atomic.set Remote_dev.Server.state selected_home;
+  assert (
+    Remote_dev.Server.start_opencode_command opencode_environment
+      (request_body
+         (Remote_dev.Home.Session_msg (Home_components.Session.Run_prompt "/")))
+    = None);
+  Atomic.set Remote_dev.Server.state selected_home;
+  with_http
+    (fun (request : Remote_dev.Runtime.http_request) ->
+      assert (String.ends_with ~suffix:"/command" request.target);
+      assert (not (String.ends_with ~suffix:"/prompt_async" request.target));
+      { status = 400; body = "unknown command" })
+    (fun () ->
+      Remote_dev.Server.complete_opencode_command opencode_environment
+        command_request);
+  assert (
+    match (Atomic.get Remote_dev.Server.state).screen with
+    | Remote_dev.Home.Session (_, { background_error = Some error; _ }) ->
+        String.contains error '4'
+    | _ -> false);
+  let status, body, _ =
+    with_http
+      (fun (request : Remote_dev.Runtime.http_request) ->
+        if String.starts_with ~prefix:"/session/busy/message" request.target
+        then
+          {
+            status = 200;
+            body =
+              "[{\"info\":{\"role\":\"assistant\"},\"parts\":[{\"type\":\"text\",\"text\":\"refreshed\"}]}]";
+          }
+        else if String.starts_with ~prefix:"/session/status" request.target then
+          {
+            status = 200;
+            body = "{\"busy\":{\"type\":\"retry\",\"message\":\"later\"}}";
+          }
+        else if String.starts_with ~prefix:"/permission" request.target then
+          { status = 200; body = "[{\"sessionID\":\"busy\"}]" }
+        else { status = 200; body = "[]" })
+      (fun () ->
+        Remote_dev.Server.response opencode_environment
+          ~body:(request_body Remote_dev.Home.Refresh)
+          `POST "/")
+  in
+  assert (status = `OK);
+  let refreshed = stream_documents body |> List.rev |> List.hd in
+  assert (has_text "Assistant: refreshed" refreshed);
+  assert (has_text "Status: retry: later" refreshed);
+  assert (has_text "Needs input in OpenCode" refreshed);
+  assert (not (has_text "User: question" refreshed));
+  assert (
+    refreshed
+    |> has_text
+         "Error: Failure(\"OpenCode server returned HTTP 400: unknown \
+          command\")");
+  Atomic.set Remote_dev.Server.state selected_home;
+  ignore (Remote_dev.Server.dispatch opencode_environment Remote_dev.Home.Back);
+  with_http
+    (fun (_ : Remote_dev.Runtime.http_request) ->
+      { status = 400; body = "late failure" })
+    (fun () ->
+      Remote_dev.Server.complete_opencode_command opencode_environment
+        command_request);
+  assert (
+    match (Atomic.get Remote_dev.Server.state).screen with
+    | Remote_dev.Home.Sessions { error = None; _ } -> true
+    | _ -> false);
   let string_to_yojson value = `String value in
   let string_of_yojson = function
     | `String value -> Ok value
@@ -1174,9 +1536,8 @@ let () =
            (Remote_dev.Home.Worktree_msg
               (Home_components.Worktree.Run_prompt "prompt")))
     with
-    | Some { agent; cwd; prompt; session_id } ->
-        agent = Remote_dev.Runtime.Claude
-        && cwd = "/tmp/clicked" && prompt = "prompt" && session_id = None
+    | Some { cwd; prompt; session_id } ->
+        cwd = "/tmp/clicked" && prompt = "prompt" && session_id = None
     | None -> false);
   assert (
     J.from_string (Remote_dev.Server.stream_start claude_environment)
@@ -1205,9 +1566,8 @@ let () =
            (Remote_dev.Home.Worktree_msg
               (Home_components.Worktree.Run_prompt "continued")))
     with
-    | Some { agent; cwd; prompt; session_id } ->
-        agent = Remote_dev.Runtime.Claude
-        && cwd = "/tmp/clicked" && prompt = "continued"
+    | Some { cwd; prompt; session_id } ->
+        cwd = "/tmp/clicked" && prompt = "continued"
         && session_id = Some "session-1"
     | None -> false);
   let hel =

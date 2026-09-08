@@ -1,10 +1,4 @@
-# startup-agent-mode Specification
-
-## Purpose
-
-Определяет обязательный неизменяемый выбор coding-agent provider при старте backend и видимое поведение выбранного режима.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Select the agent at startup
 The backend SHALL require exactly one lowercase `--agent claude|opencode` startup option. In Claude mode the repository root SHALL remain an optional positional argument and SHALL default to the backend process current working directory when omitted. In OpenCode mode any positional repository root SHALL be rejected because the connected server supplies each session directory.
@@ -28,17 +22,6 @@ The backend SHALL require exactly one lowercase `--agent claude|opencode` startu
 #### Scenario: Start without a valid agent
 - **WHEN** the backend starts without `--agent` or with a value other than `claude` or `opencode`
 - **THEN** startup fails with command-line usage information before serving requests
-
-### Requirement: Keep the startup agent immutable
-The backend MUST NOT provide a UI event, HTTP operation, or other runtime mechanism that changes the selected agent. In OpenCode mode the backend MUST NOT launch Claude CLI, including in response to an event that was not advertised by the current UI document.
-
-#### Scenario: Use the selected agent for multiple prompts
-- **WHEN** multiple prompts are submitted during one backend process
-- **THEN** every prompt is executed by the agent selected at startup
-
-#### Scenario: Receive an unadvertised creation event in OpenCode mode
-- **WHEN** the backend was started with `--agent opencode` and receives a manually constructed worktree-creation event
-- **THEN** it does not launch Claude CLI
 
 ### Requirement: Display the selected agent
 Every backend-defined UI document SHALL display a static `Agent: Claude` or `Agent: OpenCode` label matching the startup mode and SHALL NOT render a control for changing it.

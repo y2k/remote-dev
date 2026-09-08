@@ -25,26 +25,34 @@ The Android client SHALL read an `application/x-ndjson` UI-event response line b
 - **THEN** the client renders each document in response order and permits the next UI event after the response closes
 
 ### Requirement: Manual reload control
-The Android client SHALL send the `load` event envelope to `POST /` when the user pulls down at the beginning of the screen content or activates the single menu item labelled `Refresh`. The client SHALL NOT display a separate `Reload` or `Retry` button.
+The Android client SHALL send the provider-neutral root Refresh event when the user pulls down at the beginning of the screen content or activates the single menu item labelled `Refresh`. The client SHALL NOT display a separate `Reload` or `Retry` button.
 
 #### Scenario: User reloads the document
 - **WHEN** the user pulls down while the screen content is at its beginning
-- **THEN** the client sends the `load` event and replaces the displayed state with the returned UI document
+- **THEN** the client sends Refresh and replaces the displayed state with the returned UI document
 
 #### Scenario: User selects Refresh
 - **WHEN** the user activates the `Refresh` menu item
-- **THEN** the client sends the `load` event and replaces the displayed state with the returned UI document
+- **THEN** the client sends Refresh and replaces the displayed state with the returned UI document
 
 #### Scenario: Manual refresh is in progress
 - **WHEN** a request initiated by pull-to-refresh or `Refresh` is in progress
 - **THEN** the client displays the refresh indicator until the request finishes
 
 ### Requirement: Supported UI nodes
-The Android client SHALL recursively render a `column` node from its `children` array in vertical order, SHALL recursively render a `row` node from its `children` array in horizontal order, SHALL render a `text` node from its `text` string, SHALL render a `button` node from its `label` string, SHALL render an `input` node from its `label` and `event` object, and SHALL render an `image` node from its backend-relative `src` path and `label` string. A `row` node MAY include a `weights` array containing one positive number for each child; when present, the client SHALL fill the available row width and allocate that width among the children in proportion to their weights. When `weights` is absent, the client SHALL preserve the existing content-sized row layout. An image `src` path SHALL begin with `/` and SHALL NOT begin with `//`; the client SHALL resolve it against the configured backend origin. An input node MAY include a `text` string that provides the field's initial value. A button MAY include an `event` object. The client SHALL treat each `event` object as opaque backend-defined JSON.
+The Android client SHALL recursively render a `column` node from its `children` array in vertical order, SHALL recursively render a `row` node from its `children` array in horizontal order, SHALL render a `text` node from its `text` string, SHALL render a `button` node from its `label` string, SHALL render an `input` node from its `label` and `event` object, and SHALL render an `image` node from its backend-relative `src` path and `label` string. A `column` or `row` node MAY include a `weights` array containing one non-negative finite number for each child. A weighted `column` SHALL fill the available height, measure zero-weight children at their content height, allocate the remaining height among positive-weight children in proportion to their weights, and allow each positive-weight child to scroll vertically when its content exceeds its allocation. A weighted `row` SHALL fill the available width, measure zero-weight children at their content width, and allocate the remaining width among positive-weight children in proportion to their weights. When `weights` is absent, the client SHALL preserve the existing content-sized layout for that node. An image `src` path SHALL begin with `/` and SHALL NOT begin with `//`; the client SHALL resolve it against the configured backend origin. An input node MAY include a `text` string that provides the field's initial value. A button MAY include an `event` object. The client SHALL treat each `event` object as opaque backend-defined JSON.
 
 #### Scenario: Render a column
-- **WHEN** a valid `column` node contains supported child nodes
-- **THEN** the client renders those children in vertical order
+- **WHEN** a valid `column` node contains supported child nodes and omits `weights`
+- **THEN** the client renders those children in vertical order using their content-sized heights
+
+#### Scenario: Render a weighted column
+- **WHEN** a valid `column` contains three children and `weights` of `[0, 1, 0]`
+- **THEN** the client fills the available height, gives the first and third children their content heights, and gives the second child the remaining height
+
+#### Scenario: Scroll a positive-weight column child
+- **WHEN** the content of a positive-weight child is taller than its allocated area
+- **THEN** the user can scroll that child vertically while zero-weight siblings remain in place
 
 #### Scenario: Render a row
 - **WHEN** a valid `row` node contains supported child nodes and omits `weights`
@@ -53,6 +61,10 @@ The Android client SHALL recursively render a `column` node from its `children` 
 #### Scenario: Render a weighted row
 - **WHEN** a valid `row` node contains two children and `weights` of `[2, 1]`
 - **THEN** the client fills the available row width and allocates two thirds to the first child and one third to the second child
+
+#### Scenario: Render a weighted row with a zero weight
+- **WHEN** a valid `row` contains two children and `weights` of `[0, 1]`
+- **THEN** the client gives the first child its content width and gives the second child the remaining width
 
 #### Scenario: Render text
 - **WHEN** a valid `text` node contains a text string
@@ -124,7 +136,7 @@ The Android client SHALL expose a loading state while any backend-defined event 
 - **THEN** the client displays an error while keeping pull-to-refresh and the `Refresh` menu item available
 
 ### Requirement: Reject unsupported documents
-The Android client SHALL treat missing required fields, invalid field types, a `row` whose `weights` is not an array of one positive number per child, and node types other than `column`, `row`, `text`, `button`, `input`, or `image` as parse failures.
+The Android client SHALL treat missing required fields, invalid field types, a `column` or `row` whose `weights` is not an array of one non-negative finite number per child, and node types other than `column`, `row`, `text`, `button`, `input`, or `image` as parse failures.
 
 #### Scenario: Unsupported node type
 - **WHEN** the document contains a node whose `@type` is not `column`, `row`, `text`, `button`, `input`, or `image`
@@ -139,7 +151,11 @@ The Android client SHALL treat missing required fields, invalid field types, a `
 - **THEN** the client displays an error instead of partially rendering the document
 
 #### Scenario: Invalid row weights
-- **WHEN** a `row` node has a `weights` value that is not an array, differs in length from `children`, or contains a non-number or non-positive number
+- **WHEN** a `row` node has a `weights` value that is not an array, differs in length from `children`, or contains a non-number, non-finite number, or negative number
+- **THEN** the client displays an error instead of partially rendering the document
+
+#### Scenario: Invalid column weights
+- **WHEN** a `column` node has a `weights` value that is not an array, differs in length from `children`, or contains a non-number, non-finite number, or negative number
 - **THEN** the client displays an error instead of partially rendering the document
 
 #### Scenario: Invalid input content
@@ -158,14 +174,14 @@ The Android client SHALL NOT start an event request while another event request 
 - **THEN** it does not send another event request
 
 ### Requirement: Forward system Back navigation
-The Android client SHALL submit the JSON event envelope `{"event":{"type":"back"},"value":null}` when the user invokes the system Back button or Back gesture while no event request is in progress, and SHALL replace its backend-driven content with the successful response.
+The Android client SHALL submit the JSON event envelope `{"event":["Back"],"value":null}` when the user invokes the system Back button or Back gesture while no event request is in progress, and SHALL replace its backend-driven content with the successful response.
 
 #### Scenario: User invokes system Back
 - **WHEN** rendered backend-driven content is visible, no event request is in progress, and the user invokes system Back
-- **THEN** the client sends exactly one `back` event envelope to `POST /`
+- **THEN** the client sends exactly one `Back` event envelope to `POST /`
 
 #### Scenario: Back response succeeds
-- **WHEN** the `back` event receives a valid supported UI document
+- **WHEN** the `Back` event receives a valid supported UI document
 - **THEN** the client replaces the rendered content with that document
 
 ### Requirement: Do not render a separate return control

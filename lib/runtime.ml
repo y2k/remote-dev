@@ -1,11 +1,45 @@
 type worktree = { path : string; branch : string } [@@deriving yojson]
 type emulator = { serial : string; name : string } [@@deriving yojson]
 type process = Shell of string | Args of string * string array
-type agent = Claude | OpenCode
-type environment = { agent : agent; root : string }
+type agent = Claude_agent | OpenCode_agent
+type environment = Claude of { root : string } | OpenCode
 type stream_event = Session of string | Text of string
+type opencode_status = Idle | Busy | Retry of string [@@deriving yojson]
+
+type opencode_session = {
+  id : string;
+  title : string;
+  directory : string;
+  workspace : string option;
+  agent : string option;
+  model : (string * string * string option) option;
+  status : opencode_status;
+}
+[@@deriving yojson]
+
+type opencode_role = User | Assistant [@@deriving yojson]
+
+type opencode_message = { role : opencode_role; text : string }
+[@@deriving yojson]
+
+type opencode_detail = {
+  session : opencode_session;
+  messages : opencode_message list;
+  needs_input : bool;
+}
+[@@deriving yojson]
+
+type http_request = {
+  meth : Httpun.Method.t;
+  target : string;
+  headers : (string * string) list;
+  body : string;
+}
+
+type http_response = { status : int; body : string }
 
 exception Protocol_error of string
+exception OpenCode_not_found
 
 let parse_args argv =
   let agent = ref None and root = ref None in
@@ -15,8 +49,8 @@ let parse_args argv =
     agent :=
       Some
         (match value with
-        | "claude" -> Claude
-        | "opencode" -> OpenCode
+        | "claude" -> Claude_agent
+        | "opencode" -> OpenCode_agent
         | _ -> raise (Arg.Bad "--agent must be claude or opencode"))
   in
   let set_root value =
@@ -30,14 +64,22 @@ let parse_args argv =
     [ ("--agent", Arg.String set_agent, "claude|opencode Coding agent") ]
   in
   Arg.parse_argv ~current argv options set_root usage;
-  match !agent with
-  | Some agent -> { agent; root = Option.value ~default:(Sys.getcwd ()) !root }
-  | None ->
+  match (!agent, !root) with
+  | Some Claude_agent, root ->
+      Claude { root = Option.value ~default:(Sys.getcwd ()) root }
+  | Some OpenCode_agent, None -> OpenCode
+  | Some OpenCode_agent, Some _ ->
+      raise
+        (Arg.Bad
+           ("repository root is only valid with --agent claude\n"
+           ^ Arg.usage_string options usage))
+  | None, _ ->
       raise (Arg.Bad ("--agent is required\n" ^ Arg.usage_string options usage))
 
 type _ Effect.t +=
   | Process_lines : (process * (string -> unit)) -> Unix.process_status Effect.t
   | Process_bytes : process -> (string * Unix.process_status) Effect.t
+  | Http_request : http_request -> http_response Effect.t
 
 let open_process = function
   | Shell command -> Unix.open_process_in command
@@ -81,6 +123,65 @@ let with_unix_process f =
             raise exn
       in
       Effect.Deep.continue k (Buffer.contents buffer, status)
+
+let http_error = function
+  | `Malformed_response message -> message
+  | `Invalid_response_body_length _ -> "invalid response body length"
+  | `Exn exn -> Printexc.to_string exn
+
+let request_http ~net (request : http_request) =
+  Eio.Switch.run @@ fun sw ->
+  let socket =
+    Eio.Net.connect ~sw net (`Tcp (Eio.Net.Ipaddr.V4.loopback, 4096))
+  in
+  let client = Httpun_eio.Client.create_connection ~sw socket in
+  let finished, resolve = Eio.Promise.create () in
+  let response_handler response reader =
+    let body = Buffer.create 4096 in
+    let rec on_read chunk ~off ~len =
+      Buffer.add_string body (Bigstringaf.substring chunk ~off ~len);
+      Httpun.Body.Reader.schedule_read reader ~on_eof ~on_read
+    and on_eof () =
+      ignore
+        (Eio.Promise.try_resolve resolve
+           (Ok
+              {
+                status = Httpun.Status.to_code response.Httpun.Response.status;
+                body = Buffer.contents body;
+              }))
+    in
+    Httpun.Body.Reader.schedule_read reader ~on_eof ~on_read
+  in
+  let error_handler error =
+    ignore (Eio.Promise.try_resolve resolve (Error (http_error error)))
+  in
+  let headers =
+    Httpun.Headers.of_list
+      (("host", "127.0.0.1:4096")
+      :: ("content-length", string_of_int (String.length request.body))
+      :: request.headers)
+  in
+  let writer =
+    Httpun_eio.Client.request client
+      (Httpun.Request.create ~headers request.meth request.target)
+      ~error_handler ~response_handler
+  in
+  Httpun.Body.Writer.write_string writer request.body;
+  Httpun.Body.Writer.close writer;
+  let response = Eio.Promise.await finished in
+  Eio.Promise.await (Httpun_eio.Client.shutdown client);
+  match response with
+  | Ok response -> response
+  | Error message -> failwith message
+
+let with_http (handle : http_request -> http_response) f =
+  try f ()
+  with effect Http_request request, k -> (
+    match handle request with
+    | response -> Effect.Deep.continue k response
+    | exception exn -> Effect.Deep.discontinue k exn)
+
+let with_opencode_http ~net = with_http (request_http ~net)
 
 let lines process =
   let output = ref [] in
@@ -206,26 +307,6 @@ let claude_events line =
       session @ text
   | _ -> []
 
-let opencode_events line =
-  match json line with
-  | `Assoc fields ->
-      let session =
-        match field "sessionID" fields with
-        | Some (`String session_id) -> [ Session session_id ]
-        | Some _ -> raise (Protocol_error "invalid OpenCode session ID")
-        | None -> []
-      in
-      let text =
-        match (field "type" fields, field "part" fields) with
-        | Some (`String "text"), Some (`Assoc part) -> (
-            match (field "type" part, field "text" part) with
-            | Some (`String "text"), Some (`String text) -> [ Text text ]
-            | _ -> [])
-        | _ -> []
-      in
-      session @ text
-  | _ -> []
-
 let claude_process cwd prompt session_id =
   let command, arguments =
     match session_id with
@@ -260,30 +341,7 @@ let opencode_input prompt =
       in
       `Command (command, arguments)
 
-(* OpenCode 1.18.20 rejoins argv with spaces and quotes arguments that contain
-   one, so splitting only on spaces preserves the exact original input. *)
-let opencode_message value = "--" :: String.split_on_char ' ' value
-
-let opencode_process cwd prompt session_id =
-  let arguments =
-    [ "opencode"; "run"; "--dir"; cwd; "--format"; "json"; "--auto" ]
-    @
-    match session_id with
-    | Some session_id -> [ "--session"; session_id ]
-    | None -> []
-  in
-  let arguments =
-    arguments
-    @
-    match opencode_input prompt with
-    | `Prompt prompt -> opencode_message prompt
-    | `Command (command, "") -> [ "--command"; command ]
-    | `Command (command, arguments) ->
-        [ "--command"; command ] @ opencode_message arguments
-  in
-  Args ("opencode", Array.of_list arguments)
-
-let stream_prompt agent ~cwd ~prompt ~session_id on_event =
+let stream_claude ~cwd ~prompt ~session_id on_event =
   let seen_session = ref None in
   let emit = function
     | Session id when id = "" -> raise (Protocol_error "empty session ID")
@@ -301,20 +359,293 @@ let stream_prompt agent ~cwd ~prompt ~session_id on_event =
         | Some _ -> ())
     | Text _ as event -> on_event event
   in
-  let process, parse, failure =
-    match agent with
-    | Claude ->
-        (claude_process cwd prompt session_id, claude_events, "claude failed")
-    | OpenCode ->
-        ( opencode_process cwd prompt session_id,
-          opencode_events,
-          "opencode failed" )
-  in
   match
     Effect.perform
-      (Process_lines (process, fun line -> List.iter emit (parse line)))
+      (Process_lines
+         ( claude_process cwd prompt session_id,
+           fun line -> List.iter emit (claude_events line) ))
   with
   | Unix.WEXITED 0 when Option.is_none !seen_session ->
       raise (Protocol_error "agent stream omitted session ID")
   | Unix.WEXITED 0 -> ()
-  | _ -> failwith failure
+  | _ -> failwith "claude failed"
+
+let required_string name fields =
+  match field name fields with
+  | Some (`String value) -> value
+  | _ -> raise (Protocol_error ("invalid OpenCode " ^ name))
+
+let required_assoc name fields =
+  match field name fields with
+  | Some (`Assoc value) -> value
+  | _ -> raise (Protocol_error ("invalid OpenCode " ^ name))
+
+let required_list name fields =
+  match field name fields with
+  | Some (`List value) -> value
+  | _ -> raise (Protocol_error ("invalid OpenCode " ^ name))
+
+let optional_string name fields =
+  match field name fields with
+  | None | Some `Null -> None
+  | Some (`String value) -> Some value
+  | Some _ -> raise (Protocol_error ("invalid OpenCode " ^ name))
+
+let required_timestamp name fields =
+  match field name fields with
+  | Some (`Int value) -> string_of_int value
+  | Some (`Float value) -> Printf.sprintf "%.0f" value
+  | _ -> raise (Protocol_error ("invalid OpenCode " ^ name))
+
+let opencode_session = function
+  | `Assoc fields ->
+      let model =
+        match field "model" fields with
+        | None | Some `Null -> None
+        | Some (`Assoc model) ->
+            Some
+              ( required_string "providerID" model,
+                required_string "id" model,
+                optional_string "variant" model )
+        | Some _ -> raise (Protocol_error "invalid OpenCode model")
+      in
+      let updated =
+        required_assoc "time" fields |> required_timestamp "updated"
+      in
+      ( {
+          id = required_string "id" fields;
+          title = required_string "title" fields;
+          directory = required_string "directory" fields;
+          workspace = optional_string "workspaceID" fields;
+          agent = optional_string "agent" fields;
+          model;
+          status = Idle;
+        },
+        updated )
+  | _ -> raise (Protocol_error "invalid OpenCode session")
+
+let opencode_session_page body =
+  match json body with
+  | `List sessions -> List.map opencode_session sessions
+  | _ -> raise (Protocol_error "invalid OpenCode session list")
+
+let opencode_sessions body = opencode_session_page body |> List.map fst
+
+let opencode_status = function
+  | `Assoc fields -> (
+      match required_string "type" fields with
+      | "idle" -> Idle
+      | "busy" -> Busy
+      | "retry" -> Retry (required_string "message" fields)
+      | _ -> raise (Protocol_error "invalid OpenCode session status"))
+  | _ -> raise (Protocol_error "invalid OpenCode session status")
+
+let opencode_statuses body =
+  match json body with
+  | `Assoc fields ->
+      List.map (fun (id, value) -> (id, opencode_status value)) fields
+  | _ -> raise (Protocol_error "invalid OpenCode status list")
+
+let opencode_pending body =
+  match json body with
+  | `List requests ->
+      List.map
+        (function
+          | `Assoc fields -> required_string "sessionID" fields
+          | _ -> raise (Protocol_error "invalid OpenCode pending input"))
+        requests
+  | _ -> raise (Protocol_error "invalid OpenCode pending input list")
+
+let opencode_role fields =
+  match required_string "role" fields with
+  | "user" -> User
+  | "assistant" -> Assistant
+  | _ -> raise (Protocol_error "invalid OpenCode message role")
+
+let opencode_messages body =
+  match json body with
+  | `List messages ->
+      List.concat_map
+        (function
+          | `Assoc fields ->
+              let role = opencode_role (required_assoc "info" fields) in
+              required_list "parts" fields
+              |> List.filter_map (function
+                | `Assoc part when field "type" part = Some (`String "text") ->
+                    Some { role; text = required_string "text" part }
+                | _ -> None)
+          | _ -> raise (Protocol_error "invalid OpenCode message"))
+        messages
+  | _ -> raise (Protocol_error "invalid OpenCode message list")
+
+let opencode_context session model =
+  Option.to_list
+    (Option.map (fun agent -> ("agent", `String agent)) session.agent)
+  @
+  match session.model with
+  | None -> []
+  | Some (provider, id, variant) ->
+      ("model", model provider id)
+      :: Option.to_list
+           (Option.map (fun value -> ("variant", `String value)) variant)
+
+let opencode_prompt_body session prompt =
+  `Assoc
+    (opencode_context session (fun provider model ->
+         `Assoc [ ("providerID", `String provider); ("modelID", `String model) ])
+    @ [
+        ( "parts",
+          `List
+            [ `Assoc [ ("type", `String "text"); ("text", `String prompt) ] ] );
+      ])
+  |> Yojson.Basic.to_string
+
+let opencode_command_body session command arguments =
+  `Assoc
+    (opencode_context session (fun provider model ->
+         `String (provider ^ "/" ^ model))
+    @ [ ("command", `String command); ("arguments", `String arguments) ])
+  |> Yojson.Basic.to_string
+
+let is_uri_component = function
+  | 'A' .. 'Z'
+  | 'a' .. 'z'
+  | '0' .. '9'
+  | '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')' ->
+      true
+  | _ -> false
+
+let uri_component value =
+  let output = Buffer.create (String.length value) in
+  String.iter
+    (fun character ->
+      if is_uri_component character then Buffer.add_char output character
+      else
+        Buffer.add_string output (Printf.sprintf "%%%02X" (Char.code character)))
+    value;
+  Buffer.contents output
+
+let perform_http ?directory ?workspace meth target body =
+  let target, headers =
+    match (meth, directory) with
+    | `GET, Some directory ->
+        let query =
+          "directory=" ^ uri_component directory
+          ^
+          match workspace with
+          | Some workspace -> "&workspace=" ^ uri_component workspace
+          | None -> ""
+        in
+        ( (target
+          ^ if String.contains target '?' then "&" ^ query else "?" ^ query),
+          [] )
+    | `POST, Some directory ->
+        ( (match workspace with
+          | Some workspace -> target ^ "?workspace=" ^ uri_component workspace
+          | None -> target),
+          [ ("x-opencode-directory", uri_component directory) ] )
+    | (`GET | `POST), None -> (target, [])
+    | _ -> assert false
+  in
+  let headers =
+    if meth = `POST && body <> "" then
+      ("content-type", "application/json") :: headers
+    else headers
+  in
+  Effect.perform (Http_request { meth; target; headers; body })
+
+let expect_status expected { status; body } =
+  if status = expected then body
+  else if status = 404 then raise OpenCode_not_found
+  else
+    failwith
+      (Printf.sprintf "OpenCode server returned HTTP %d%s" status
+         (if body = "" then "" else ": " ^ body))
+
+let get ?directory ?workspace target =
+  perform_http ?directory ?workspace `GET target "" |> expect_status 200
+
+let post ?directory ?workspace ?(body = "") expected target =
+  perform_http ?directory ?workspace `POST target body |> expect_status expected
+
+let session_status statuses id =
+  Option.value ~default:Idle (List.assoc_opt id statuses)
+
+let load_opencode_sessions () =
+  let rec load cursor sessions =
+    let target =
+      "/experimental/session?limit=100"
+      ^ match cursor with Some value -> "&cursor=" ^ value | None -> ""
+    in
+    let page = get target |> opencode_session_page in
+    let sessions = List.rev_append (List.map fst page) sessions in
+    if List.length page < 100 then List.rev sessions
+    else load (List.rev page |> List.hd |> snd |> Option.some) sessions
+  in
+  let sessions = load None [] in
+  let statuses =
+    sessions
+    |> List.map (fun session -> (session.directory, session.workspace))
+    |> List.sort_uniq compare
+    |> List.concat_map (fun (directory, workspace) ->
+        get ~directory ?workspace "/session/status" |> opencode_statuses)
+  in
+  List.map
+    (fun (session : opencode_session) ->
+      { session with status = session_status statuses session.id })
+    sessions
+
+let load_opencode_detail (session : opencode_session) =
+  let directory = session.directory in
+  let id = uri_component session.id in
+  let messages =
+    get ~directory ?workspace:session.workspace ("/session/" ^ id ^ "/message")
+    |> opencode_messages
+  in
+  let statuses =
+    get ~directory ?workspace:session.workspace "/session/status"
+    |> opencode_statuses
+  in
+  let permissions =
+    get ~directory ?workspace:session.workspace "/permission"
+    |> opencode_pending
+  in
+  let questions =
+    get ~directory ?workspace:session.workspace "/question" |> opencode_pending
+  in
+  {
+    session = { session with status = session_status statuses session.id };
+    messages;
+    needs_input =
+      List.mem session.id permissions || List.mem session.id questions;
+  }
+
+let submit_opencode_prompt session prompt =
+  ignore
+    (post ~directory:session.directory ?workspace:session.workspace
+       ~body:(opencode_prompt_body session prompt)
+       204
+       ("/session/" ^ uri_component session.id ^ "/prompt_async"))
+
+let validate_command_response body =
+  match json body with
+  | `Assoc fields ->
+      ignore (required_assoc "info" fields);
+      ignore (required_list "parts" fields)
+  | _ -> raise (Protocol_error "invalid OpenCode command response")
+
+let submit_opencode_command session command arguments =
+  post ~directory:session.directory ?workspace:session.workspace
+    ~body:(opencode_command_body session command arguments)
+    200
+    ("/session/" ^ uri_component session.id ^ "/command")
+  |> validate_command_response
+
+let abort_opencode session =
+  match
+    post ~directory:session.directory ?workspace:session.workspace 200
+      ("/session/" ^ uri_component session.id ^ "/abort")
+    |> json
+  with
+  | `Bool true -> ()
+  | _ -> raise (Protocol_error "invalid OpenCode abort response")

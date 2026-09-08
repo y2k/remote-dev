@@ -1,6 +1,6 @@
 type 'event t =
   | Button of string * 'event option
-  | Column of 'event t list
+  | Column of int list option * 'event t list
   | Row of int list option * 'event t list
   | Text of string
   | Edit of string * string option * 'event
@@ -18,7 +18,7 @@ module Cmd = struct
 end
 
 let button ?event title = Button (title, event)
-let column children = Column children
+let column ?weights children = Column (weights, children)
 let row ?weights children = Row (weights, children)
 let text value = Text value
 let edit ?text ~event label = Edit (label, text, event)
@@ -26,7 +26,7 @@ let image ~src ~label = Image (src, label)
 
 let rec map f = function
   | Button (title, event) -> Button (title, Option.map f event)
-  | Column children -> Column (List.map (map f) children)
+  | Column (weights, children) -> Column (weights, List.map (map f) children)
   | Row (weights, children) -> Row (weights, List.map (map f) children)
   | Text value -> Text value
   | Edit (label, text, event) -> Edit (label, text, f event)
@@ -39,12 +39,18 @@ let rec to_json event = function
         (match action with
         | Some action -> fields @ [ ("event", event action) ]
         | None -> fields)
-  | Column children ->
-      `Assoc
+  | Column (weights, children) ->
+      let fields =
         [
           ("@type", `String "column");
           ("children", `List (List.map (to_json event) children));
         ]
+      in
+      `Assoc
+        (match weights with
+        | Some weights ->
+            fields @ [ ("weights", `List (List.map (fun x -> `Int x) weights)) ]
+        | None -> fields)
   | Row (weights, children) ->
       let fields =
         [

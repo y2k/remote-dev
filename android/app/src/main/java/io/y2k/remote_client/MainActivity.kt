@@ -12,15 +12,23 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.rememberScrollableState
+import androidx.compose.foundation.gestures.scrollable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -54,7 +62,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 sealed interface UiNode {
-    data class Column(val children: List<UiNode>) : UiNode
+    data class Column(
+        val children: List<UiNode>,
+        val weights: List<Float>? = null,
+    ) : UiNode
 
     data class Row(
         val children: List<UiNode>,
@@ -83,6 +94,7 @@ sealed interface UiNode {
 }
 
 data class UiEvent(val json: String)
+internal val refreshEvent = UiEvent("""["Refresh"]""")
 
 fun parseUiNode(json: String): UiNode = parseUiNode(JSONObject(json))
 
@@ -101,29 +113,29 @@ private fun parseUiNode(node: JSONObject): UiNode {
                             ?: throw IllegalArgumentException("$type child must be an object")
                     parseUiNode(child)
                 }
-            if (type == "column") {
-                UiNode.Column(parsedChildren)
-            } else {
-                val weights =
-                    if (node.has("weights")) {
-                        val values =
-                            node.get("weights") as? JSONArray
-                                ?: throw IllegalArgumentException("Row weights must be an array")
-                        if (values.length() != parsedChildren.size) {
-                            throw IllegalArgumentException("Row weights must match children")
-                        }
-                        List(values.length()) { index ->
-                            val weight =
-                                (values.get(index) as? Number)?.toFloat()
-                                    ?: throw IllegalArgumentException("Row weight must be a number")
-                            if (!weight.isFinite() || weight <= 0f) {
-                                throw IllegalArgumentException("Row weight must be positive")
-                            }
-                            weight
-                        }
-                    } else {
-                        null
+            val weights =
+                if (node.has("weights")) {
+                    val values =
+                        node.get("weights") as? JSONArray
+                            ?: throw IllegalArgumentException("$type weights must be an array")
+                    if (values.length() != parsedChildren.size) {
+                        throw IllegalArgumentException("$type weights must match children")
                     }
+                    List(values.length()) { index ->
+                        val weight =
+                            (values.get(index) as? Number)?.toFloat()
+                                ?: throw IllegalArgumentException("$type weight must be a number")
+                        if (!weight.isFinite() || weight < 0f) {
+                            throw IllegalArgumentException("$type weight must be non-negative")
+                        }
+                        weight
+                    }
+                } else {
+                    null
+                }
+            if (type == "column") {
+                UiNode.Column(parsedChildren, weights)
+            } else {
                 UiNode.Row(parsedChildren, weights)
             }
         }
@@ -238,7 +250,6 @@ private fun App(client: HttpClient) {
     var eventInProgress by remember { mutableStateOf(false) }
     var eventError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    val loadEvent = UiEvent("""["Worktrees_msg",["Load"]]""")
     val backEvent = UiEvent("""["Back"]""")
 
     fun sendRequest(refreshing: Boolean = false, request: suspend () -> Unit) {
@@ -312,31 +323,41 @@ private fun App(client: HttpClient) {
         if (allowed) {
             if (!eventInProgress) {
                 isRefreshing = true
-                sendEvent(loadEvent, null, refreshing = true)
+                sendEvent(refreshEvent, null, refreshing = true)
             }
         } else {
             requestPermission.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
         }
     }
 
-    Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-        PullToRefreshBox(
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        contentWindowInsets = WindowInsets.safeDrawing,
+        topBar = {
+            TopAppBar(
+                title = { Text("remote_dev") },
+                actions = { RefreshMenu(::refresh) },
+            )
+        },
+    ) { innerPadding ->
+        RefreshableColumn(
             modifier =
                 Modifier.fillMaxSize()
                     .padding(horizontal = 4.dp)
                     .padding(innerPadding)
+                    .consumeWindowInsets(innerPadding)
                     .background(MaterialTheme.colorScheme.background),
             isRefreshing = isRefreshing,
             onRefresh = ::refresh,
         ) {
-            Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                if (!allowed) {
-                    Text("Error: Local network permission required")
-                } else {
-                    when (val current = state) {
-                        ScreenState.Loading -> Text("Loading...")
-                        is ScreenState.Content -> {
-                            if (eventInProgress) Text("Loading...")
+            if (!allowed) {
+                Text("Error: Local network permission required")
+            } else {
+                when (val current = state) {
+                    ScreenState.Loading -> Text("Loading...")
+                    is ScreenState.Content -> {
+                        if (eventInProgress) Text("Loading...")
+                        Box(Modifier.weight(1f)) {
                             UiNodeContent(
                                 node = current.node,
                                 onButtonEvent = { event -> sendEvent(event, null) },
@@ -344,13 +365,36 @@ private fun App(client: HttpClient) {
                                 eventInProgress = eventInProgress,
                                 loadImage = ::loadImage,
                             )
-                            eventError?.let { Text("Error: $it") }
                         }
-                        is ScreenState.Error -> Text("Error: ${current.message}")
+                        eventError?.let { Text("Error: $it") }
                     }
+                    is ScreenState.Error -> Text("Error: ${current.message}")
                 }
             }
         }
+    }
+}
+
+@Composable
+internal fun RefreshMenu(onRefresh: () -> Unit) {
+    TextButton(onClick = onRefresh) { Text("Refresh") }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+internal fun RefreshableColumn(
+    isRefreshing: Boolean,
+    onRefresh: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    PullToRefreshBox(isRefreshing = isRefreshing, onRefresh = onRefresh, modifier = modifier) {
+        Column(
+            modifier =
+                Modifier.fillMaxSize()
+                    .scrollable(rememberScrollableState { 0f }, Orientation.Vertical),
+            content = content,
+        )
     }
 }
 
