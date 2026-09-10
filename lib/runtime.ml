@@ -552,6 +552,13 @@ let perform_http ?directory ?workspace meth target body =
       ("content-type", "application/json") :: headers
     else headers
   in
+  let headers =
+    match Sys.getenv_opt "OPENCODE_SERVER_PASSWORD" with
+    | None | Some "" -> headers
+    | Some password ->
+        ("authorization", "Basic " ^ Base64.encode_exn ("opencode:" ^ password))
+        :: headers
+  in
   Effect.perform (Http_request { meth; target; headers; body })
 
 let expect_status expected { status; body } =
@@ -560,7 +567,7 @@ let expect_status expected { status; body } =
   else
     failwith
       (Printf.sprintf "OpenCode server returned HTTP %d%s" status
-         (if body = "" then "" else ": " ^ body))
+         (if status = 401 || body = "" then "" else ": " ^ body))
 
 let get ?directory ?workspace target =
   perform_http ?directory ?workspace `GET target "" |> expect_status 200
@@ -572,17 +579,7 @@ let session_status statuses id =
   Option.value ~default:Idle (List.assoc_opt id statuses)
 
 let load_opencode_sessions () =
-  let rec load cursor sessions =
-    let target =
-      "/experimental/session?limit=100"
-      ^ match cursor with Some value -> "&cursor=" ^ value | None -> ""
-    in
-    let page = get target |> opencode_session_page in
-    let sessions = List.rev_append (List.map fst page) sessions in
-    if List.length page < 100 then List.rev sessions
-    else load (List.rev page |> List.hd |> snd |> Option.some) sessions
-  in
-  let sessions = load None [] in
+  let sessions = get "/experimental/session?limit=20" |> opencode_sessions in
   let statuses =
     sessions
     |> List.map (fun session -> (session.directory, session.workspace))

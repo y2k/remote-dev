@@ -56,7 +56,16 @@ opencode attach http://127.0.0.1:4096
 make run ARGS="--agent opencode"
 ```
 
-`opencode attach` is optional and can run in another terminal, but it is required to answer permissions or questions. OpenCode mode rejects a positional repository root. It lists existing sessions from all projects known to the server and does not create sessions.
+`opencode attach` is optional and can run in another terminal, but it is required to answer permissions or questions. OpenCode mode rejects a positional repository root. It lists the 20 most recently updated sessions across all projects known to the server and does not create sessions. Older sessions remain in OpenCode history.
+
+If the OpenCode server uses a password, the remote_dev backend must inherit the same `OPENCODE_SERVER_PASSWORD`. Export it in each terminal before starting its process; setting it only for `opencode serve` does not pass it to a separately started backend. For example, after setting the variable in the backend's terminal:
+
+```sh
+export OPENCODE_SERVER_PASSWORD
+make run ARGS="--agent opencode"
+```
+
+The backend sends Basic authentication on every OpenCode request when the password is non-empty, always using the username `opencode`. An unset or empty password sends no authorization header. Restart the backend after changing its environment. HTTP 401 means the server rejected the request's authentication.
 
 The selected agent cannot be changed without restarting remote_dev. The backend does not start or stop `opencode serve` and reports connection or protocol errors in the UI. It listens on all IPv4 interfaces at port `8080`.
 

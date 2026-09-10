@@ -5,7 +5,12 @@ let with_process ~check lines (status : Unix.process_status) f =
     List.iter on_line lines;
     Effect.Deep.continue k status
 
-let with_http = Remote_dev.Runtime.with_http
+let with_http handle =
+  Remote_dev.Runtime.with_http (fun request ->
+      (if Array.length Sys.argv = 2 then
+         let expected = if Sys.argv.(1) = "" then None else Some Sys.argv.(1) in
+         assert (List.assoc_opt "authorization" request.headers = expected));
+      handle request)
 
 let with_emulator_processes f =
   try f () with
@@ -101,6 +106,34 @@ let has_usage message =
   |> List.exists (String.starts_with ~prefix:"Usage:")
 
 let () =
+  (if Array.length Sys.argv = 1 then
+     let environment =
+       Unix.environment () |> Array.to_list
+       |> List.filter (fun entry ->
+           not
+             (String.starts_with ~prefix:"OPENCODE_SERVER_PASSWORD=" entry
+             || String.starts_with ~prefix:"OPENCODE_SERVER_USERNAME=" entry))
+     in
+     List.iter
+       (fun (credentials, expected) ->
+         let pid =
+           Unix.create_process_env Sys.executable_name
+             [| Sys.executable_name; expected |]
+             (Array.of_list (credentials @ environment))
+             Unix.stdin Unix.stdout Unix.stderr
+         in
+         assert (snd (Unix.waitpid [] pid) = Unix.WEXITED 0))
+       [
+         ([], "");
+         ([ "OPENCODE_SERVER_PASSWORD=" ], "");
+         ([ "OPENCODE_SERVER_PASSWORD=secret" ], "Basic b3BlbmNvZGU6c2VjcmV0");
+         ( [
+             "OPENCODE_SERVER_PASSWORD=secret"; "OPENCODE_SERVER_USERNAME=alice";
+           ],
+           "Basic b3BlbmNvZGU6c2VjcmV0" );
+         ( [ "OPENCODE_SERVER_PASSWORD= p:a\tss\n " ],
+           "Basic b3BlbmNvZGU6IHA6YQlzcwog" );
+       ]);
   let claude =
     Remote_dev.Runtime.parse_args [| "remote_dev"; "--agent"; "claude" |]
   in
@@ -315,7 +348,7 @@ let () =
       (fun (request : Remote_dev.Runtime.http_request) ->
         requests := request :: !requests;
         match request.target with
-        | "/experimental/session?limit=100" ->
+        | "/experimental/session?limit=20" ->
             { status = 200; body = session_json }
         | "/session/status?directory=%2Ftmp%2Fa%20b%25&workspace=workspace%201"
           ->
@@ -327,7 +360,7 @@ let () =
   assert (List.length !requests = 2);
   let page =
     `List
-      (List.init 100 (fun index ->
+      (List.init 20 (fun index ->
            `Assoc
              [
                ("id", `String ("paged-" ^ string_of_int index));
@@ -350,16 +383,19 @@ let () =
       (fun (request : Remote_dev.Runtime.http_request) ->
         paged_requests := request.target :: !paged_requests;
         match request.target with
-        | "/experimental/session?limit=100" -> { status = 200; body = page }
-        | "/experimental/session?limit=100&cursor=101" ->
-            { status = 200; body = "[]" }
+        | "/experimental/session?limit=20" -> { status = 200; body = page }
         | "/session/status?directory=%2Ftmp%2Fpaged" ->
             { status = 200; body = "{}" }
         | _ -> assert false)
       Remote_dev.Runtime.load_opencode_sessions
   in
-  assert (List.length paged = 100);
-  assert (List.length !paged_requests = 3);
+  assert (List.length paged = 20);
+  assert (
+    List.map
+      (fun (session : Remote_dev.Runtime.opencode_session) -> session.id)
+      paged
+    = List.init 20 (fun index -> "paged-" ^ string_of_int index));
+  assert (List.length !paged_requests = 2);
   let session = List.hd sessions in
   let detail =
     with_http
@@ -452,6 +488,18 @@ let () =
             { Remote_dev.Runtime.status = 200; body = "not-json" })
           Remote_dev.Runtime.load_opencode_sessions
         |> ignore));
+  assert (
+    try
+      with_http
+        (fun (_ : Remote_dev.Runtime.http_request) ->
+          {
+            Remote_dev.Runtime.status = 401;
+            body = "secret Authorization: Basic YWxpY2U6c2VjcmV0";
+          })
+        Remote_dev.Runtime.load_opencode_sessions
+      |> ignore;
+      false
+    with Failure message -> message = "OpenCode server returned HTTP 401");
   let root = "/tmp/remote-dev" in
   with_process ~check:(check_create_worktree root "feature/new-worktree")
     [] (Unix.WEXITED 0) (fun () ->

@@ -22,6 +22,7 @@
     (ocaml (>= 5.3))
    eio
    eio_main
+   base64
    httpun-eio
    yojson
    (ppx_variants_conv (and (>= v0.17) (< v0.18)))

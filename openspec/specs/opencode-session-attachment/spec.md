@@ -6,6 +6,30 @@ Lets the Android client inspect and continue existing OpenCode conversations whi
 
 ## Requirements
 
+### Requirement: Authenticate requests to the local OpenCode server
+In OpenCode mode, the backend SHALL send HTTP Basic authentication on every request to `127.0.0.1:4096` when its own process environment contains a non-empty `OPENCODE_SERVER_PASSWORD`. The credentials SHALL use that password verbatim and the constant username `opencode`, regardless of any username environment variable. The backend SHALL omit the Authorization header when the password is unset or empty. The backend SHALL NOT expose credentials or the generated Authorization header in its UI documents or logs.
+
+#### Scenario: Password with constant username
+- **WHEN** the backend has a non-empty `OPENCODE_SERVER_PASSWORD`
+- **THEN** every OpenCode request includes `Authorization: Basic <credentials>` using standard padded Base64 of `opencode:<password>` without line wrapping
+
+#### Scenario: Username environment is ignored
+- **WHEN** the backend has a non-empty password and a username environment variable is set
+- **THEN** every OpenCode request still uses `opencode` as the username
+
+#### Scenario: Coverage of reads and writes
+- **WHEN** the backend lists sessions, loads session details or status, checks pending input, submits a prompt or command, or aborts a session with a configured password
+- **THEN** each request includes the configured Basic authentication credentials
+
+#### Scenario: Password is unavailable to the backend
+- **WHEN** `OPENCODE_SERVER_PASSWORD` is unset or empty in the backend environment, regardless of the server environment
+- **THEN** the backend sends no Authorization header
+
+#### Scenario: Credentials are rejected
+- **WHEN** the OpenCode server returns HTTP 401
+- **THEN** the existing error-reporting path displays the failure and the backend remains available
+- **AND** the backend does not include its credentials or generated Authorization header in UI documents or logs
+
 ### Requirement: Connect to the local OpenCode server
 In OpenCode mode the backend SHALL connect to an independently started OpenCode server at `127.0.0.1:4096`. The backend SHALL NOT start, stop, or expose that server on its LAN listener.
 
@@ -18,11 +42,16 @@ In OpenCode mode the backend SHALL connect to an independently started OpenCode 
 - **THEN** the current UI document displays the failure and the remote_dev backend remains available
 
 ### Requirement: List existing OpenCode sessions
-The OpenCode root screen SHALL list every existing session returned by the connected server. Each row SHALL display the session title, directory, and current status, and SHALL select that exact session when activated. The screen SHALL NOT list Git worktrees or provide a control for creating an OpenCode session.
+The OpenCode root screen SHALL list at most the 20 most recently updated sessions across projects returned by the connected server, newest first. The backend SHALL request a single page with a limit of 20 and SHALL load statuses only for the returned sessions' contexts. Older sessions SHALL remain in OpenCode history. Each row SHALL display the session title, directory, and current status, and SHALL select that exact session when activated. The screen SHALL NOT list Git worktrees or provide a control for creating an OpenCode session.
 
 #### Scenario: Server has sessions from multiple directories
 - **WHEN** the connected server returns sessions belonging to different directories
-- **THEN** the root screen displays every returned session with its own directory
+- **THEN** the root screen displays the returned page of up to 20 sessions with their own directories
+
+#### Scenario: Server has more than 20 sessions
+- **WHEN** the server returns a full page of 20 sessions ordered by most recent update
+- **THEN** the root screen displays those sessions in that order
+- **AND** the backend does not request another page or statuses for contexts outside that page
 
 #### Scenario: Server has no sessions
 - **WHEN** the connected server returns an empty session list
