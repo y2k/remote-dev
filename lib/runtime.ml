@@ -2,7 +2,7 @@ type worktree = { path : string; branch : string } [@@deriving yojson]
 type emulator = { serial : string; name : string } [@@deriving yojson]
 type process = Shell of string | Args of string * string array
 type agent = Claude_agent | OpenCode_agent
-type environment = Claude of { root : string } | OpenCode
+type environment = Claude of { root : string } | OpenCode of { root : string }
 type stream_event = Session of string | Text of string
 type opencode_status = Idle | Busy | Retry of string [@@deriving yojson]
 
@@ -56,24 +56,23 @@ let parse_args argv =
   let set_root value =
     match !root with
     | None -> root := Some value
-    | Some _ -> raise (Arg.Bad "only one repository root is allowed")
+    | Some _ -> raise (Arg.Bad "only one directory is allowed")
   in
   let current = ref 0 in
-  let usage = "Usage: remote_dev --agent claude|opencode [repository-root]" in
+  let usage = "Usage: remote_dev --agent claude|opencode [directory]" in
   let options =
     [ ("--agent", Arg.String set_agent, "claude|opencode Coding agent") ]
   in
   Arg.parse_argv ~current argv options set_root usage;
-  match (!agent, !root) with
-  | Some Claude_agent, root ->
-      Claude { root = Option.value ~default:(Sys.getcwd ()) root }
-  | Some OpenCode_agent, None -> OpenCode
-  | Some OpenCode_agent, Some _ ->
-      raise
-        (Arg.Bad
-           ("repository root is only valid with --agent claude\n"
-           ^ Arg.usage_string options usage))
-  | None, _ ->
+  let cwd = Sys.getcwd () in
+  let root = Option.value ~default:cwd !root in
+  let root =
+    if Filename.is_relative root then Filename.concat cwd root else root
+  in
+  match !agent with
+  | Some Claude_agent -> Claude { root }
+  | Some OpenCode_agent -> OpenCode { root }
+  | None ->
       raise (Arg.Bad ("--agent is required\n" ^ Arg.usage_string options usage))
 
 type _ Effect.t +=
@@ -219,6 +218,27 @@ let load_emulators () =
       let name = try emulator_name serial with Failure _ -> serial in
       { serial; name })
 
+let tap_emulator serial ~x ~y =
+  match
+    Effect.perform
+      (Process_lines
+         ( Args
+             ( "adb",
+               [|
+                 "adb";
+                 "-s";
+                 serial;
+                 "shell";
+                 "input";
+                 "tap";
+                 string_of_int x;
+                 string_of_int y;
+               |] ),
+           ignore ))
+  with
+  | Unix.WEXITED 0 -> ()
+  | _ -> failwith "emulator tap failed"
+
 let capture_emulator_screenshot serial =
   match
     Effect.perform
@@ -227,6 +247,18 @@ let capture_emulator_screenshot serial =
   with
   | screenshot, Unix.WEXITED 0 -> screenshot
   | _ -> failwith "emulator screenshot failed"
+
+let load_directories root =
+  (* ponytail: full scan and O(n log n) sort; use bounded top-10 if large-directory
+     measurements show sorting is a bottleneck. *)
+  Sys.readdir root |> Array.to_list
+  |> List.filter_map (fun name ->
+      let stat = Unix.lstat (Filename.concat root name) in
+      if stat.st_kind = Unix.S_DIR then Some (name, stat.st_mtime) else None)
+  |> List.sort (fun (a, a_time) (b, b_time) ->
+      let order = Float.compare b_time a_time in
+      if order = 0 then String.compare a b else order)
+  |> List.take 10 |> List.map fst
 
 let load_worktrees (path : string) : worktree list =
   let command =

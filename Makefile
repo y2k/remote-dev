@@ -16,5 +16,6 @@ watch:
 
 .PHONY: android-run
 android-run:
-	ANDROID_SERIAL=emulator-5554 ./android/gradlew --no-daemon -p android :app:installDebug
-	adb -s emulator-5554 shell am start -n io.y2k.remote_client/.MainActivity
+	export ANDROID_SERIAL=abf51f11 && \
+		./android/gradlew --no-daemon -p android :app:installDebug && \
+		adb shell am start -n io.y2k.remote_client/.MainActivity

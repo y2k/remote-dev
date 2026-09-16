@@ -2,6 +2,7 @@ open Components
 open Home_components
 
 type screen =
+  | Directories of Directories.model
   | Worktrees of Worktrees.model
   | New_worktree of Worktrees.model * New_worktree.model
   | Worktree of Worktree.model
@@ -13,6 +14,7 @@ type model = { screen : screen; emulator : Emulator.model }
 type msg =
   | Back
   | Refresh
+  | Directories_msg of Directories.msg
   | Worktrees_msg of Worktrees.msg
   | New_worktree_msg of New_worktree.msg
   | Worktree_msg of Worktree.msg
@@ -25,6 +27,8 @@ type msg =
 let view environment { screen; emulator } =
   let screen =
     match screen with
+    | Directories model ->
+        Components.map directories_msg (Directories.view model)
     | Worktrees model -> Components.map worktrees_msg (Worktrees.view model)
     | New_worktree (_, model) ->
         Components.map new_worktree_msg (New_worktree.view model)
@@ -33,18 +37,20 @@ let view environment { screen; emulator } =
     | Session (_, model) -> Components.map session_msg (Session.view model)
   in
   row ~weights:[ 2; 1 ]
+    ~gap:(Gap.make ~color:Outline_variant 1)
     [
       column
         [
           text
             (match environment with
             | Runtime.Claude _ -> "Agent: Claude"
-            | Runtime.OpenCode -> "Agent: OpenCode");
+            | Runtime.OpenCode _ -> "Agent: OpenCode");
           screen;
         ];
       Components.map emulator_msg (Emulator.view emulator);
     ]
 
+let lift_directories = Cmd.map directories_msg
 let lift_worktrees = Cmd.map worktrees_msg
 let lift_new_worktree = Cmd.map new_worktree_msg
 let lift_worktree = Cmd.map worktree_msg
@@ -54,11 +60,11 @@ let lift_emulator = Cmd.map emulator_msg
 
 let init environment =
   let emulator, cmd = Emulator.init () in
-  let screen =
+  let root =
     match environment with
-    | Runtime.Claude { root } -> Worktrees (Worktrees.init root |> fst)
-    | Runtime.OpenCode -> Sessions (Sessions.init () |> fst)
+    | Runtime.Claude { root } | Runtime.OpenCode { root } -> root
   in
+  let screen = Directories (Directories.init root |> fst) in
   ({ screen; emulator }, Cmd.map initialize_emulator cmd)
 
 let update_page state screen lift update model message =
@@ -67,25 +73,27 @@ let update_page state screen lift update model message =
 
 let claude_root = function
   | Runtime.Claude { root } -> root
-  | Runtime.OpenCode -> assert false
+  | Runtime.OpenCode _ -> assert false
 
 let update environment ({ screen; _ } as state) message =
   match (screen, message) with
-  | _, Initialize_emulator message ->
+  | Directories model, Initialize_emulator message ->
       let emulator, _ = Emulator.update state.emulator message in
-      let screen, cmd =
-        match environment with
-        | Runtime.Claude { root } ->
-            let worktrees, cmd = Worktrees.init root in
-            (Worktrees worktrees, lift_worktrees cmd)
-        | Runtime.OpenCode ->
-            let sessions, cmd = Sessions.init () in
-            (Sessions sessions, lift_sessions cmd)
-      in
-      ({ screen; emulator }, cmd)
+      update_page { state with emulator }
+        (fun model -> Directories model)
+        lift_directories Directories.update model Directories.Load
   | _, Emulator_msg message ->
       let emulator, cmd = Emulator.update state.emulator message in
       ({ state with emulator }, lift_emulator cmd)
+  | Directories model, Refresh ->
+      update_page state
+        (fun model -> Directories model)
+        lift_directories Directories.update model Directories.Load
+  | Directories model, Directories_msg message ->
+      update_page state
+        (fun model -> Directories model)
+        lift_directories Directories.update model message
+  | Directories _, Back -> (state, Cmd.none)
   | Worktrees model, Refresh ->
       update_page state
         (fun model -> Worktrees model)

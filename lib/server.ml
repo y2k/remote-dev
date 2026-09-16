@@ -41,6 +41,9 @@ let decode body =
       with
       | Ok (Home.Worktree_msg (Worktree.Session_started _)) ->
           Error "Invalid event request"
+      | Ok (Home.Emulator_msg (Emulator.Tapped _))
+      | Ok (Home.Initialize_emulator (Emulator.Tapped _))
+      | Ok (Home.Directories_msg (Directories.Loaded _))
       | Ok (Home.Sessions_msg (Sessions.Loaded _))
       | Ok (Home.Session_msg (Session.Loaded _))
       | Ok (Home.Session_msg Session.Missing)
@@ -58,8 +61,7 @@ let stream_document environment model = J.to_string (to_json environment model)
 let state =
   Atomic.make
     {
-      Home.screen =
-        Worktrees { Home_components.Worktrees.worktrees = []; error = None };
+      Home.screen = Directories { root = ""; entries = []; error = None };
       emulator =
         { Emulator.emulators = []; selected_emulator = None; error = None };
     }
@@ -92,10 +94,10 @@ let start_prompt_stream environment body =
       match next.screen with
       | Home.Worktree { path; session_id; _ } ->
           Some { cwd = path; prompt; session_id }
-      | Home.Worktrees _ | Home.New_worktree _ | Home.Sessions _
-      | Home.Session _ ->
+      | Home.Directories _ | Home.Worktrees _ | Home.New_worktree _
+      | Home.Sessions _ | Home.Session _ ->
           None)
-  | (Runtime.Claude _ | Runtime.OpenCode), (Ok _ | Error _) -> None
+  | (Runtime.Claude _ | Runtime.OpenCode _), (Ok _ | Error _) -> None
 
 type opencode_command = {
   session : Runtime.opencode_session;
@@ -105,7 +107,7 @@ type opencode_command = {
 
 let start_opencode_command environment body =
   match (environment, decode body) with
-  | ( Runtime.OpenCode,
+  | ( Runtime.OpenCode _,
       Ok (Home.Session_msg (Session.Run_prompt prompt) as message) ) -> (
       match Runtime.opencode_input prompt with
       | `Prompt _ -> None
@@ -114,10 +116,10 @@ let start_opencode_command environment body =
           match next.screen with
           | Home.Session (_, { session; _ }) ->
               Some { session; command; arguments }
-          | Home.Worktrees _ | Home.New_worktree _ | Home.Worktree _
-          | Home.Sessions _ ->
+          | Home.Directories _ | Home.Worktrees _ | Home.New_worktree _
+          | Home.Worktree _ | Home.Sessions _ ->
               None))
-  | (Runtime.Claude _ | Runtime.OpenCode), (Ok _ | Error _) -> None
+  | (Runtime.Claude _ | Runtime.OpenCode _), (Ok _ | Error _) -> None
 
 let complete_opencode_command environment { session; command; arguments } =
   let result =
@@ -132,12 +134,12 @@ let complete_opencode_command environment { session; command; arguments } =
 
 let start_opencode_prompt environment body =
   match (environment, decode body) with
-  | ( Runtime.OpenCode,
+  | ( Runtime.OpenCode _,
       Ok (Home.Session_msg (Session.Run_prompt prompt) as message) ) -> (
       match Runtime.opencode_input prompt with
       | `Prompt _ -> Some (step environment message)
       | `Command _ -> None)
-  | (Runtime.Claude _ | Runtime.OpenCode), (Ok _ | Error _) -> None
+  | (Runtime.Claude _ | Runtime.OpenCode _), (Ok _ | Error _) -> None
 
 let stream_event environment = function
   | Runtime.Session session_id ->

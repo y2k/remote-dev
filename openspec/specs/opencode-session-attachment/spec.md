@@ -31,31 +31,39 @@ In OpenCode mode, the backend SHALL send HTTP Basic authentication on every requ
 - **AND** the backend does not include its credentials or generated Authorization header in UI documents or logs
 
 ### Requirement: Connect to the local OpenCode server
-In OpenCode mode the backend SHALL connect to an independently started OpenCode server at `127.0.0.1:4096`. The backend SHALL NOT start, stop, or expose that server on its LAN listener.
+In OpenCode mode the backend SHALL obtain OpenCode session data from an independently started OpenCode server at `127.0.0.1:4096` when a session-list or selected-session screen loads it. The backend SHALL NOT start, stop, or expose that server on its LAN listener. Loading or refreshing the startup directory screen SHALL NOT contact the OpenCode server.
 
 #### Scenario: Local server is available
 - **WHEN** the backend loads OpenCode sessions while the local server is listening at `127.0.0.1:4096`
 - **THEN** it obtains session data from that server
 
 #### Scenario: Local server is unavailable
-- **WHEN** an initial load or manual refresh cannot reach the local OpenCode server
-- **THEN** the current UI document displays the failure and the remote_dev backend remains available
+- **WHEN** a load or manual refresh of an OpenCode session-list or selected-session screen cannot reach the local OpenCode server
+- **THEN** that UI document displays the failure and the remote_dev backend remains available
+
+#### Scenario: Directory screen without OpenCode
+- **WHEN** the directory screen is loaded or refreshed while the local OpenCode server is unavailable
+- **THEN** directory loading proceeds independently without an OpenCode request
 
 ### Requirement: List existing OpenCode sessions
-The OpenCode root screen SHALL list at most the 20 most recently updated sessions across projects returned by the connected server, newest first. The backend SHALL request a single page with a limit of 20 and SHALL load statuses only for the returned sessions' contexts. Older sessions SHALL remain in OpenCode history. Each row SHALL display the session title, directory, and current status, and SHALL select that exact session when activated. The screen SHALL NOT list Git worktrees or provide a control for creating an OpenCode session.
+When active, the OpenCode session-list screen SHALL list at most the 20 most recently updated sessions across projects returned by the connected server, newest first. The backend SHALL request a single page with a limit of 20 and SHALL load statuses only for the returned sessions' contexts. Older sessions SHALL remain in OpenCode history. Each row SHALL display the session title, directory, and current status, and SHALL select that exact session when activated. The screen SHALL NOT list Git worktrees or provide a control for creating an OpenCode session. This screen SHALL NOT be the startup root screen; startup SHALL show the common directory-list screen instead.
 
 #### Scenario: Server has sessions from multiple directories
-- **WHEN** the connected server returns sessions belonging to different directories
-- **THEN** the root screen displays the returned page of up to 20 sessions with their own directories
+- **WHEN** the active session-list screen loads sessions belonging to different directories from the connected server
+- **THEN** it displays the returned page of up to 20 sessions with their own directories
 
 #### Scenario: Server has more than 20 sessions
-- **WHEN** the server returns a full page of 20 sessions ordered by most recent update
-- **THEN** the root screen displays those sessions in that order
+- **WHEN** the server returns a full page of 20 sessions ordered by most recent update for the active session-list screen
+- **THEN** the screen displays those sessions in that order
 - **AND** the backend does not request another page or statuses for contexts outside that page
 
 #### Scenario: Server has no sessions
-- **WHEN** the connected server returns an empty session list
-- **THEN** the root screen states that there are no OpenCode sessions and does not offer session creation
+- **WHEN** the connected server returns an empty session list for the active session-list screen
+- **THEN** the screen states that there are no OpenCode sessions and does not offer session creation
+
+#### Scenario: Backend starts in OpenCode mode
+- **WHEN** the backend initializes in OpenCode mode
+- **THEN** it displays the directory-list screen instead of loading the session-list screen
 
 ### Requirement: Render the selected session transcript
 Selecting an OpenCode session SHALL load its messages using the session ID and directory supplied by the server. The selected-session screen SHALL display the session title, directory, current status, and all user and assistant text parts in conversation order. Non-text parts SHALL NOT be rendered.
@@ -73,15 +81,19 @@ Selecting an OpenCode session SHALL load its messages using the session ID and d
 - **THEN** the backend returns to the session list and displays an error without selecting a replacement
 
 ### Requirement: Navigate OpenCode session screens
-The backend SHALL process Back from a selected-session screen by returning the loaded session-list document. Back on the OpenCode root screen SHALL leave that screen unchanged without reporting an error.
+The backend SHALL process Back from a selected-session screen by returning the loaded session-list document. Back on the session-list screen SHALL leave that screen unchanged without reporting an error. Back on the common startup directory screen SHALL leave that directory screen unchanged without reporting an error.
 
 #### Scenario: Return from a selected session
 - **WHEN** an OpenCode session screen is active and the backend receives Back
 - **THEN** it returns the loaded session-list document
 
 #### Scenario: Back on the session list
-- **WHEN** the OpenCode root screen is active and the backend receives Back
+- **WHEN** the OpenCode session-list screen is active and the backend receives Back
 - **THEN** it returns the same session-list document without an error
+
+#### Scenario: Back on the startup directory screen
+- **WHEN** the startup directory screen is active in OpenCode mode and the backend receives Back
+- **THEN** it returns the same directory-list document without an error
 
 ### Requirement: Submit an asynchronous follow-up
 Submitting an ordinary prompt from the selected-session screen SHALL send the complete text to that exact session through the OpenCode asynchronous prompt operation, using the directory returned for the session. The Android event response SHALL complete after the server accepts the prompt and SHALL NOT wait for or stream the agent response.
@@ -95,15 +107,19 @@ Submitting an ordinary prompt from the selected-session screen SHALL send the co
 - **THEN** the complete value is encoded as prompt text without shell interpretation
 
 ### Requirement: Refresh OpenCode session state
-Manual refresh SHALL reload the session list when the OpenCode root screen is active and SHALL reload transcript, status, and pending-input state when a session screen is active. The connected OpenCode server SHALL remain the source of truth; the backend SHALL NOT persist a session transcript or execution status.
+Manual root refresh SHALL reload directories when the common startup directory screen is active, SHALL reload the session list when the OpenCode session-list screen is active, and SHALL reload transcript, status, and pending-input state when a session screen is active. The connected OpenCode server SHALL remain the source of truth for OpenCode session data; the backend SHALL NOT persist a session transcript or execution status. Directory-screen refresh SHALL NOT request OpenCode session data.
 
 #### Scenario: Refresh a running session
 - **WHEN** the user refreshes a selected session after OpenCode has produced more text
 - **THEN** the returned document includes the latest transcript and status from the server
 
 #### Scenario: Refresh the session list
-- **WHEN** the user refreshes the OpenCode root screen after another client created or updated a session
+- **WHEN** the user refreshes the active OpenCode session-list screen after another client created or updated a session
 - **THEN** the returned list reflects the server's current sessions
+
+#### Scenario: Refresh the directory screen
+- **WHEN** the user refreshes the startup directory screen in OpenCode mode
+- **THEN** the returned list reflects the startup root's current subdirectories without requesting OpenCode sessions
 
 ### Requirement: Stop a busy OpenCode session
 The selected-session screen SHALL provide a stop control only while the session is busy. Activating it SHALL request abortion of that exact session and then reload the selected session state.

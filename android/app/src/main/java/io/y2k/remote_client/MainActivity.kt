@@ -29,8 +29,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -61,15 +63,41 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
+enum class ThemeColor(val wireName: String) {
+    Background("background"),
+    Surface("surface"),
+    SurfaceContainer("surfaceContainer"),
+    Primary("primary"),
+    PrimaryContainer("primaryContainer"),
+    OutlineVariant("outlineVariant"),
+}
+
+data class UiPadding(val start: Int = 0, val top: Int = 0, val end: Int = 0, val bottom: Int = 0)
+
+data class UiGap(val size: Int = 4, val color: ThemeColor? = null)
+
+data class UiBorder(val width: Int, val color: ThemeColor)
+
 sealed interface UiNode {
     data class Column(
         val children: List<UiNode>,
         val weights: List<Float>? = null,
+        val stretch: Boolean = false,
+        val background: ThemeColor? = null,
+        val padding: UiPadding = UiPadding(),
+        val gap: UiGap = UiGap(),
+        val border: UiBorder? = null,
+        val cornerRadius: Int = 0,
     ) : UiNode
 
     data class Row(
         val children: List<UiNode>,
         val weights: List<Float>? = null,
+        val background: ThemeColor? = null,
+        val padding: UiPadding = UiPadding(),
+        val gap: UiGap = UiGap(),
+        val border: UiBorder? = null,
+        val cornerRadius: Int = 0,
     ) : UiNode
 
     data class Text(val text: String) : UiNode
@@ -87,16 +115,32 @@ sealed interface UiNode {
         val text: String = "",
     ) : UiNode
 
+    data class VoiceInput(val event: UiEvent) : UiNode
+
     data class Image(
         val src: String,
         val label: String,
+        val event: UiEvent? = null,
     ) : UiNode
 }
 
 data class UiEvent(val json: String)
+
 internal val refreshEvent = UiEvent("""["Refresh"]""")
 
 fun parseUiNode(json: String): UiNode = parseUiNode(JSONObject(json))
+
+private fun JSONObject.spacingSize(key: String): Int {
+    val value = opt(key)
+    require((value is Int || value is Long) && (value as Number).toLong() in 0..Int.MAX_VALUE.toLong()) {
+        "$key must be an integer in 0..2147483647"
+    }
+    return (value as Number).toInt()
+}
+
+private fun JSONObject.themeColor(key: String): ThemeColor? =
+    if (!has(key)) null else ThemeColor.entries.firstOrNull { it.wireName == opt(key) }
+        ?: throw IllegalArgumentException("$key must be a supported theme role")
 
 private fun parseUiNode(node: JSONObject): UiNode {
     val type = node.get("@type") as? String ?: throw IllegalArgumentException("Missing @type")
@@ -133,10 +177,34 @@ private fun parseUiNode(node: JSONObject): UiNode {
                 } else {
                     null
                 }
+            val background = node.themeColor("background")
+            val padding = if (node.has("padding")) {
+                val p = node.opt("padding") as? JSONObject
+                    ?: throw IllegalArgumentException("padding must be an object")
+                UiPadding(p.spacingSize("start"), p.spacingSize("top"), p.spacingSize("end"), p.spacingSize("bottom"))
+            } else UiPadding()
+            val gap = if (node.has("gap")) {
+                val g = node.opt("gap") as? JSONObject
+                    ?: throw IllegalArgumentException("gap must be an object")
+                UiGap(g.spacingSize("size"), g.themeColor("color"))
+            } else UiGap()
+            val border = if (node.has("border")) {
+                val b = node.opt("border") as? JSONObject
+                    ?: throw IllegalArgumentException("border must be an object")
+                UiBorder(b.spacingSize("width"), requireNotNull(b.themeColor("color")) { "border color is required" })
+            } else null
+            val cornerRadius = if (node.has("cornerRadius")) node.spacingSize("cornerRadius") else 0
             if (type == "column") {
-                UiNode.Column(parsedChildren, weights)
+                val stretch =
+                    if (node.has("stretch")) {
+                        node.get("stretch") as? Boolean
+                            ?: throw IllegalArgumentException("column stretch must be a boolean")
+                    } else {
+                        false
+                    }
+                UiNode.Column(parsedChildren, weights, stretch, background, padding, gap, border, cornerRadius)
             } else {
-                UiNode.Row(parsedChildren, weights)
+                UiNode.Row(parsedChildren, weights, background, padding, gap, border, cornerRadius)
             }
         }
         "text" ->
@@ -169,6 +237,12 @@ private fun parseUiNode(node: JSONObject): UiNode {
                     ""
                 },
             )
+        "voice_input" -> {
+            require(!node.has("label") && !node.has("text")) {
+                "Voice input cannot have label or text"
+            }
+            UiNode.VoiceInput(parseEvent(node, "Voice input"))
+        }
         "image" -> {
             val src =
                 node.get("src") as? String
@@ -180,6 +254,7 @@ private fun parseUiNode(node: JSONObject): UiNode {
                 src,
                 node.get("label") as? String
                     ?: throw IllegalArgumentException("Image label must be a string"),
+                if (node.has("event")) parseEvent(node, "Image") else null,
             )
         }
         else -> throw IllegalArgumentException("Unsupported node type: $type")
@@ -337,13 +412,16 @@ private fun App(client: HttpClient) {
             TopAppBar(
                 title = { Text("remote_dev") },
                 actions = { RefreshMenu(::refresh) },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                ),
             )
         },
     ) { innerPadding ->
         RefreshableColumn(
             modifier =
                 Modifier.fillMaxSize()
-                    .padding(horizontal = 4.dp)
+                    .padding(horizontal = 12.dp)
                     .padding(innerPadding)
                     .consumeWindowInsets(innerPadding)
                     .background(MaterialTheme.colorScheme.background),
@@ -358,13 +436,15 @@ private fun App(client: HttpClient) {
                     is ScreenState.Content -> {
                         if (eventInProgress) Text("Loading...")
                         Box(Modifier.weight(1f)) {
-                            UiNodeContent(
-                                node = current.node,
-                                onButtonEvent = { event -> sendEvent(event, null) },
-                                onInputEvent = { event, value -> sendEvent(event, value) },
-                                eventInProgress = eventInProgress,
-                                loadImage = ::loadImage,
-                            )
+                            CompositionLocalProvider(LocalUiDocument provides current) {
+                                UiNodeContent(
+                                    node = current.node,
+                                    onButtonEvent = { event -> sendEvent(event, null) },
+                                    onInputEvent = { event, value -> sendEvent(event, value) },
+                                    eventInProgress = eventInProgress,
+                                    loadImage = ::loadImage,
+                                )
+                            }
                         }
                         eventError?.let { Text("Error: $it") }
                     }
@@ -401,7 +481,7 @@ internal fun RefreshableColumn(
 private sealed interface ScreenState {
     data object Loading : ScreenState
 
-    data class Content(val node: UiNode) : ScreenState
+    class Content(val node: UiNode) : ScreenState
 
     data class Error(val message: String) : ScreenState
 }

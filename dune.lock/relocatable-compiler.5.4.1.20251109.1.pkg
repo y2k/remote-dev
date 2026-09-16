@@ -57,6 +57,9 @@
        (when false "")
        (when false "")
        CC=cc
+       ; ponytail: SDK 27 exposes symbols absent on macOS 26; remove when OCaml checks runtime availability.
+       ac_cv_func_pipe2=no
+       ac_cv_func_dup3=no
        (when false "")
        (when false "")
        (when false "")

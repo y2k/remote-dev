@@ -1,5 +1,53 @@
 open Components
 
+module Directories = struct
+  type model = { root : string; entries : string list; error : string option }
+
+  open Result_yojson
+
+  type msg = Load | Loaded of (string list, string) result | Click of string
+  [@@deriving yojson]
+
+  let view { root; entries; error } : msg Components.t =
+    let errors =
+      match error with Some error -> [ text ("Error: " ^ error) ] | None -> []
+    in
+    let entries =
+      match (entries, error) with
+      | [], None -> [ text "No subdirectories" ]
+      | entries, _ ->
+          List.map
+            (fun name -> button ~event:(Click (Filename.concat root name)) name)
+            entries
+    in
+    column ~stretch:true ~weights:[ 0; 0; 0; 1 ]
+      [
+        text "Directories";
+        text root;
+        column errors;
+        column ~stretch:true entries;
+      ]
+
+  let load root : msg Cmd.t =
+    Cmd.Run
+      (fun () ->
+        try Some (Loaded (Ok (Runtime.load_directories root)))
+        with exn -> Some (Loaded (Error (Printexc.to_string exn))))
+
+  let init root = ({ root; entries = []; error = None }, load root)
+
+  let update model = function
+    | Load -> (model, load model.root)
+    | Loaded (Ok entries) -> ({ model with entries; error = None }, Cmd.none)
+    | Loaded (Error error) -> ({ model with error = Some error }, Cmd.none)
+    | Click path ->
+        ( model,
+          Cmd.Run
+            (fun () ->
+              Printf.printf "Directory clicked: %S\n%!" path;
+              None) )
+end
+
 module New_worktree = struct
   type model = { error : string option }
 
@@ -16,7 +64,8 @@ module New_worktree = struct
 
   let view { error } : msg Components.t =
     let content =
-      column [ text "New worktree"; edit ~event:(Create "__VALUE__") "Branch" ]
+      column ~stretch:true
+        [ text "New worktree"; edit ~event:(Create "__VALUE__") "Branch" ]
     in
     match error with
     | None -> content
@@ -49,12 +98,18 @@ module Emulator = struct
   open Result_yojson
 
   type msg =
+    | Refresh
     | Loaded of (Runtime.emulator list, string) result
     | Select of string
+    | Tap of string * string
+    | Tapped of (unit, string) result
   [@@deriving yojson]
 
+  type tap = { x : int; y : int; width : int; height : int }
+  [@@deriving of_yojson]
+
   let view { emulators; selected_emulator; error } : msg Components.t =
-    let content =
+    let preview =
       match selected_emulator with
       | Some serial -> (
           match
@@ -63,24 +118,34 @@ module Emulator = struct
               emulators
           with
           | Some emulator ->
-              column
-                [
-                  text "Emulators";
-                  row
-                    (List.map
-                       (fun (emulator : Runtime.emulator) ->
-                         button ~event:(Select emulator.serial) emulator.name)
-                       emulators);
-                  image
-                    ~src:("/emulators/" ^ serial ^ "/screenshot.png")
-                    ~label:emulator.name;
-                ]
-          | None -> column [ text "Emulators"; text "No running emulators" ])
-      | None -> column [ text "Emulators"; text "No running emulators" ]
+              image
+                ~event:(Tap (serial, "__VALUE__"))
+                ~src:("/emulators/" ^ serial ^ "/screenshot.png")
+                ~label:emulator.name ()
+          | None -> text "Selected emulator unavailable")
+      | None ->
+          text
+            (if emulators = [] then "No running emulators"
+             else "Select an emulator")
     in
-    match error with
-    | None -> content
-    | Some error -> column [ text ("Error: " ^ error); content ]
+    column ~background:Surface ~padding:(Padding.all 8) ~weights:[ 0; 0 ]
+      [
+        column
+          (match error with
+          | None -> []
+          | Some error -> [ text ("Error: " ^ error) ]);
+        column
+          [
+            text "Emulators";
+            row ~gap:(Gap.make 8)
+              (button ~event:Refresh "Refresh"
+              :: List.map
+                   (fun (emulator : Runtime.emulator) ->
+                     button ~event:(Select emulator.serial) emulator.name)
+                   emulators);
+            preview;
+          ];
+      ]
 
   let load : msg Cmd.t =
     Cmd.Run
@@ -92,13 +157,8 @@ module Emulator = struct
     ({ emulators = []; selected_emulator = None; error = None }, load)
 
   let update model = function
-    | Loaded (Ok emulators) ->
-        let selected_emulator =
-          match emulators with
-          | (emulator : Runtime.emulator) :: _ -> Some emulator.serial
-          | [] -> None
-        in
-        ({ emulators; selected_emulator; error = None }, Cmd.none)
+    | Refresh -> (model, load)
+    | Loaded (Ok emulators) -> ({ model with emulators; error = None }, Cmd.none)
     | Loaded (Error error) -> ({ model with error = Some error }, Cmd.none)
     | Select serial
       when List.exists
@@ -106,6 +166,36 @@ module Emulator = struct
              model.emulators ->
         ({ model with selected_emulator = Some serial }, Cmd.none)
     | Select _ -> (model, Cmd.none)
+    | Tap (serial, payload)
+      when model.selected_emulator = Some serial
+           && List.exists
+                (fun (emulator : Runtime.emulator) -> emulator.serial = serial)
+                model.emulators -> (
+        match
+          try tap_of_yojson (Yojson.Safe.from_string payload)
+          with Yojson.Json_error _ -> Error "Invalid tap"
+        with
+        | Ok { x; y; width; height }
+          when width > 0 && height > 0 && x >= 0 && x < width && y >= 0
+               && y < height ->
+            ( model,
+              Cmd.Run
+                (fun () ->
+                  Some
+                    (Tapped
+                       (try
+                          Runtime.tap_emulator serial ~x ~y;
+                          Ok ()
+                        with exn -> Error (Printexc.to_string exn)))) )
+        | _ -> ({ model with error = Some "Invalid emulator tap" }, Cmd.none))
+    | Tap _ -> (model, Cmd.none)
+    | Tapped result ->
+        ( {
+            model with
+            error =
+              (match result with Ok () -> None | Error error -> Some error);
+          },
+          Cmd.none )
 end
 
 module Worktree = struct
@@ -142,7 +232,7 @@ module Worktree = struct
     in
     let shortcuts =
       [
-        row
+        column ~stretch:true
           [
             button ~event:(Set_prompt "/igor-pending-reviews")
               "/igor-pending-reviews";
@@ -151,14 +241,18 @@ module Worktree = struct
           ];
       ]
     in
-    column ~weights:[ 0; 0; 0; 1; 0; 0 ]
+    column ~stretch:true ~weights:[ 0; 0; 0; 1; 0; 0 ]
       [
         column errors;
         text "Worktree";
         row [ text "Path:"; text path ];
         column messages;
         column shortcuts;
-        edit ~text:prompt ~event:(Run_prompt "__VALUE__") "Commands";
+        row ~weights:[ 1; 0 ]
+          [
+            edit ~text:prompt ~event:(Run_prompt "__VALUE__") "Commands";
+            voice_input ~event:(Set_prompt "__VALUE__");
+          ];
       ]
 
   let update model = function
@@ -211,16 +305,26 @@ module Sessions = struct
       | sessions ->
           List.map
             (fun (session : Runtime.opencode_session) ->
-              column
+              column ~stretch:true ~background:Surface
+                ~border:(Border.make ~color:Outline_variant 1)
+                ~corner_radius:12 ~padding:(Padding.all 16) ~gap:(Gap.make 8)
                 [
-                  button ~event:(Select session.id) session.title;
+                  row ~weights:[ 1; 0 ] ~gap:(Gap.make 12)
+                    [
+                      button ~event:(Select session.id) session.title;
+                      text ("Status: " ^ status session.status);
+                    ];
                   text session.directory;
-                  text ("Status: " ^ status session.status);
                 ])
             sessions
     in
-    column ~weights:[ 0; 0; 1 ]
-      [ column errors; text "OpenCode sessions:"; column sessions ]
+    column ~stretch:true ~weights:[ 0; 0; 1 ] ~padding:(Padding.all 12)
+      ~gap:(Gap.make 12)
+      [
+        column errors;
+        text "OpenCode sessions:";
+        column ~stretch:true ~gap:(Gap.make 12) sessions;
+      ]
 
   let load : msg Cmd.t =
     Cmd.Run
@@ -255,6 +359,7 @@ module Session = struct
     | Loaded of (Runtime.opencode_detail, string) result
     | Missing
     | Run_prompt of string
+    | Set_prompt of string
     | Submitted of (unit, string) result
     | Stop
     | Command_finished of string * (unit, string) result
@@ -308,7 +413,7 @@ module Session = struct
       | Runtime.Busy -> [ button ~event:Stop "Stop" ]
       | Runtime.Idle | Runtime.Retry _ -> []
     in
-    column ~weights:[ 0; 0; 0; 0; 0; 1; 0; 0 ]
+    column ~stretch:true ~weights:[ 0; 0; 0; 0; 0; 1; 0; 0 ]
       [
         column errors;
         text "OpenCode session";
@@ -317,7 +422,11 @@ module Session = struct
         text ("Status: " ^ status session.status);
         column messages;
         column (pending @ stop);
-        edit ~text:prompt ~event:(Run_prompt "__VALUE__") "Prompt";
+        row ~weights:[ 1; 0 ]
+          [
+            edit ~text:prompt ~event:(Run_prompt "__VALUE__") "Prompt";
+            voice_input ~event:(Set_prompt "__VALUE__");
+          ];
       ]
 
   let update model = function
@@ -333,6 +442,7 @@ module Session = struct
           Cmd.none )
     | Loaded (Error error) -> ({ model with error = Some error }, Cmd.none)
     | Missing -> (model, Cmd.none)
+    | Set_prompt prompt -> ({ model with prompt; error = None }, Cmd.none)
     | Run_prompt prompt -> (
         match Runtime.opencode_input prompt with
         | `Prompt prompt ->

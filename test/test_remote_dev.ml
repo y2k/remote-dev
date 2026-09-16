@@ -10,7 +10,7 @@ let claude_environment : Remote_dev.Runtime.environment =
   Remote_dev.Runtime.Claude { root = "/tmp/remote-dev-root" }
 
 let opencode_environment : Remote_dev.Runtime.environment =
-  Remote_dev.Runtime.OpenCode
+  Remote_dev.Runtime.OpenCode { root = Sys.getcwd () }
 
 let with_process f =
   try f ()
@@ -83,6 +83,24 @@ let with_failed_emulator_load f =
       List.iter on_line [ "worktree /tmp/remote-dev"; "branch refs/heads/main" ];
       Effect.Deep.continue k (Unix.WEXITED 0)
 
+let capture_stdout f =
+  let path = Filename.temp_file "remote-dev-log-" "" in
+  let saved = Unix.dup Unix.stdout in
+  let output = open_out path in
+  flush stdout;
+  Fun.protect
+    ~finally:(fun () ->
+      flush stdout;
+      Unix.dup2 saved Unix.stdout;
+      Unix.close saved;
+      close_out output;
+      Sys.remove path)
+    (fun () ->
+      Unix.dup2 (Unix.descr_of_out_channel output) Unix.stdout;
+      let result = f () in
+      let log = In_channel.with_open_bin path In_channel.input_all in
+      (result, log))
+
 module Todo = struct
   type event = Submit
 
@@ -96,6 +114,32 @@ module App = struct
 end
 
 let () =
+  assert (
+    let open Remote_dev.Components in
+    column [ row [ voice_input ~event:() ] ]
+    |> map (fun () -> `List [ `String "Voice" ])
+    |> to_json Fun.id
+    = `Assoc
+        [
+          ("@type", `String "column");
+          ( "children",
+            `List
+              [
+                `Assoc
+                  [
+                    ("@type", `String "row");
+                    ( "children",
+                      `List
+                        [
+                          `Assoc
+                            [
+                              ("@type", `String "voice_input");
+                              ("event", `List [ `String "Voice" ]);
+                            ];
+                        ] );
+                  ];
+              ] );
+        ]);
   let request_body message =
     J.to_string
       (`Assoc
@@ -156,6 +200,11 @@ let () =
         | ( Some (`String "row"),
             Some (`List [ left; right ]),
             Some (`List [ `Int 2; `Int 1 ]) ) ->
+            assert (
+              List.assoc_opt "gap" fields
+              = Some
+                  (`Assoc
+                     [ ("size", `Int 1); ("color", `String "outlineVariant") ]));
             Some (left, right)
         | _ -> None)
     | _ -> None
@@ -179,7 +228,7 @@ let () =
                 [
                   Remote_dev.Components.image
                     ~src:"/emulators/emulator-5554/screenshot.png"
-                    ~label:"Pixel";
+                    ~label:"Pixel" ();
                 ];
             ]))
     = `Assoc
@@ -210,7 +259,7 @@ let () =
     Remote_dev.Components.to_json App.encode
       (Remote_dev.Components.map
          (fun event -> App.Todo event)
-         (Remote_dev.Components.column ~weights:[ 0; 1 ]
+         (Remote_dev.Components.column ~stretch:true ~weights:[ 0; 1 ]
             [
               Remote_dev.Components.button ~event:Todo.Submit "Button";
               Remote_dev.Components.text "Output";
@@ -229,8 +278,207 @@ let () =
                   ];
                 `Assoc [ ("@type", `String "text"); ("text", `String "Output") ];
               ] );
+          ("stretch", `Bool true);
           ("weights", `List [ `Int 0; `Int 1 ]);
         ]);
+  let () =
+    let open Remote_dev.Components in
+    List.iter
+      (fun (background, name) ->
+        let tree =
+          column ~stretch:true ~weights:[ 1 ] ~background
+            [ row ~weights:[ 1 ] ~background [ button ~event:1 "Go" ] ]
+        in
+        let json = tree |> map succ |> to_json (fun n -> `Int n) in
+        let open Yojson.Basic.Util in
+        let nested = json |> member "children" |> to_list |> List.hd in
+        assert (json |> member "background" = `String name);
+        assert (json |> member "stretch" = `Bool true);
+        assert (json |> member "weights" = `List [ `Int 1 ]);
+        assert (nested |> member "background" = `String name);
+        assert (nested |> member "weights" = `List [ `Int 1 ]);
+        assert (
+          nested |> member "children" |> to_list |> List.hd |> member "event"
+          = `Int 2))
+      [
+        (Background, "background");
+        (Surface, "surface");
+        (Surface_container, "surfaceContainer");
+        (Primary, "primary");
+        (Primary_container, "primaryContainer");
+        (Outline_variant, "outlineVariant");
+      ];
+    List.iter
+      (fun node ->
+        match to_json (fun n -> `Int n) node with
+        | `Assoc fields -> assert (not (List.mem_assoc "background" fields))
+        | _ -> assert false)
+      [ column []; row [] ]
+  in
+  let () =
+    let open Remote_dev.Components in
+    assert (
+      Padding.all 12 = Padding.only ~start:12 ~top:12 ~end_:12 ~bottom:12 ());
+    assert (
+      Padding.symmetric ~horizontal:16 ~vertical:8
+      = Padding.only ~start:16 ~top:8 ~end_:16 ~bottom:8 ());
+    assert (
+      Padding.only ~top:8 ~bottom:16 ()
+      = { Padding.start = 0; top = 8; end_ = 0; bottom = 16 });
+    assert ((Gap.make 2147483647).size = 2147483647);
+    List.iter
+      (fun value ->
+        List.iter
+          (fun make ->
+            match make () with
+            | () -> assert false
+            | exception Invalid_argument _ -> ())
+          [
+            (fun () -> ignore (Padding.all value));
+            (fun () -> ignore (Padding.symmetric ~horizontal:0 ~vertical:value));
+            (fun () -> ignore (Padding.only ~start:value ()));
+            (fun () -> ignore (Padding.only ~top:value ()));
+            (fun () -> ignore (Padding.only ~end_:value ()));
+            (fun () -> ignore (Padding.only ~bottom:value ()));
+            (fun () -> ignore (Gap.make value));
+            (fun () -> ignore (Border.make ~color:Primary value));
+            (fun () -> ignore (row ~corner_radius:value []));
+            (fun () -> ignore (column ~corner_radius:value []));
+          ])
+      [ -1; 2147483648 ];
+    let open Yojson.Basic.Util in
+    List.iter
+      (fun (color, name) ->
+        let padding = Padding.only ~top:8 ~bottom:16 () in
+        let gap = Gap.make ~color 8 in
+        let border = Border.make ~color 2 in
+        let json =
+          column ~stretch:true ~weights:[ 1 ] ~background:Surface ~padding ~gap
+            ~border ~corner_radius:12
+            [
+              row ~weights:[ 1 ] ~background:Surface ~padding ~gap ~border
+                ~corner_radius:12
+                [ button ~event:1 "Go" ];
+            ]
+          |> Remote_dev.Components.map succ
+          |> to_json (fun n -> `Int n)
+        in
+        let nested = json |> member "children" |> to_list |> List.hd in
+        List.iter
+          (fun node ->
+            assert (
+              node |> member "padding"
+              = `Assoc
+                  [
+                    ("start", `Int 0);
+                    ("top", `Int 8);
+                    ("end", `Int 0);
+                    ("bottom", `Int 16);
+                  ]);
+            assert (
+              node |> member "gap"
+              = `Assoc [ ("size", `Int 8); ("color", `String name) ]);
+            assert (node |> member "background" = `String "surface");
+            assert (
+              node |> member "border"
+              = `Assoc [ ("width", `Int 2); ("color", `String name) ]);
+            assert (node |> member "cornerRadius" = `Int 12);
+            assert (node |> member "weights" = `List [ `Int 1 ]))
+          [ json; nested ];
+        assert (json |> member "stretch" = `Bool true);
+        assert (
+          nested |> member "children" |> to_list |> List.hd |> member "event"
+          = `Int 2))
+      [
+        (Background, "background");
+        (Surface, "surface");
+        (Surface_container, "surfaceContainer");
+        (Primary, "primary");
+        (Primary_container, "primaryContainer");
+        (Outline_variant, "outlineVariant");
+      ];
+    List.iter
+      (fun node ->
+        let json = to_json (fun () -> `Null) node in
+        assert (json |> member "gap" = `Assoc [ ("size", `Int 0) ]);
+        assert (
+          json |> member "padding"
+          = `Assoc
+              [
+                ("start", `Int 0);
+                ("top", `Int 0);
+                ("end", `Int 0);
+                ("bottom", `Int 0);
+              ]))
+      [
+        row ~padding:(Padding.all 0) ~gap:(Gap.make 0) [];
+        column ~padding:(Padding.all 0) ~gap:(Gap.make 0) [];
+      ];
+    List.iter
+      (fun node ->
+        match to_json (fun () -> `Null) node with
+        | `Assoc fields ->
+            assert (not (List.mem_assoc "padding" fields));
+            assert (not (List.mem_assoc "gap" fields))
+        | _ -> assert false)
+      [ row []; column [] ]
+  in
+  let () =
+    let open Remote_dev.Components in
+    let open Yojson.Basic.Util in
+    List.iter
+      (fun make ->
+        List.iter
+          (fun radius ->
+            List.iter
+              (fun border ->
+                let json =
+                  make border radius
+                  |> Remote_dev.Components.map succ
+                  |> to_json (fun n -> `Int n)
+                in
+                assert (
+                  json |> member "cornerRadius"
+                  = match radius with None -> `Null | Some n -> `Int n);
+                assert (
+                  json |> member "border"
+                  =
+                  match border with
+                  | None -> `Null
+                  | Some (b : Border.t) ->
+                      `Assoc
+                        [
+                          ("width", `Int b.width); ("color", `String "primary");
+                        ]))
+              [
+                None;
+                Some (Border.make ~color:Primary 0);
+                Some (Border.make ~color:Primary 2147483647);
+              ])
+          [ None; Some 0; Some 2147483647 ])
+      [
+        (fun border corner_radius -> row ?border ?corner_radius []);
+        (fun border corner_radius -> column ?border ?corner_radius []);
+      ]
+  in
+  let image_event = `List [ `String "Tap" ] in
+  assert (
+    Remote_dev.Components.image ~event:() ~src:"/preview.png" ~label:"Pixel" ()
+    |> Remote_dev.Components.map (fun () -> image_event)
+    |> Remote_dev.Components.to_json Fun.id
+    = `Assoc
+        [
+          ("@type", `String "image");
+          ("src", `String "/preview.png");
+          ("label", `String "Pixel");
+          ("event", image_event);
+        ]);
+  let children = [ Remote_dev.Components.text "Default" ] in
+  assert (
+    Remote_dev.Components.to_json App.encode
+      (Remote_dev.Components.column ~stretch:false children)
+    = Remote_dev.Components.to_json App.encode
+        (Remote_dev.Components.column children));
   assert (
     Remote_dev.Components.to_json App.encode
       (Remote_dev.Components.map
@@ -315,6 +563,14 @@ let () =
     Home_components.Worktrees.init "/tmp/remote-dev-root" |> fst
   in
   let initial_worktree path = Home_components.Worktree.init path |> fst in
+  let initial_directories =
+    Home_components.Directories.init "/tmp/remote-dev-root" |> fst
+  in
+  let directories_document ?(environment = claude_environment)
+      ?(emulator = initial_emulator) model =
+    Remote_dev.Server.to_json environment
+      { screen = Remote_dev.Home.Directories model; emulator }
+  in
   let worktrees_document ?(environment = claude_environment)
       ?(emulator = initial_emulator) model =
     Remote_dev.Server.to_json environment
@@ -351,9 +607,194 @@ let () =
         assert (has_text left_text left);
         assert (not (has_text "Emulators" left));
         assert (has_text "Emulators" right);
+        let fields =
+          match right with `Assoc fields -> fields | _ -> assert false
+        in
+        assert (List.assoc "background" fields = `String "surface");
+        assert (List.assoc "weights" fields = `List [ `Int 0; `Int 0 ]);
+        assert (
+          has_event
+            (home_event
+               (Remote_dev.Home.Emulator_msg Home_components.Emulator.Refresh))
+            right);
         check_right right
     | None -> assert false
   in
+  let module Directories = Home_components.Directories in
+  let root = Filename.temp_dir "remote-dev-ui-" "" |> Unix.realpath in
+  let cwd = Sys.getcwd () in
+  Fun.protect
+    ~finally:(fun () ->
+      Sys.chdir cwd;
+      Sys.readdir root
+      |> Array.iter (fun name -> Unix.rmdir (Filename.concat root name));
+      Unix.rmdir root)
+    (fun () ->
+      let dir = "example\nquoted\"" in
+      let path = Filename.concat root dir in
+      let model, load = Directories.init root in
+      assert (Cmd.run load = Some (Directories.Loaded (Ok [])));
+      assert (has_text "No subdirectories" (directories_document model));
+      Unix.mkdir path 0o700;
+      let loaded, _ = Directories.update model (Option.get (Cmd.run load)) in
+      assert (loaded.entries = [ dir ]);
+      let failed, _ =
+        Directories.update loaded (Directories.Loaded (Error "failed"))
+      in
+      assert (failed.entries = loaded.entries);
+      let initial_failure, _ =
+        Directories.update model (Directories.Loaded (Error "failed"))
+      in
+      let failure_document = directories_document initial_failure in
+      assert (has_text "Error: failed" failure_document);
+      assert (not (has_text "No subdirectories" failure_document));
+      let _, retry = Directories.update failed Directories.Load in
+      let recovered, _ =
+        Directories.update failed (Option.get (Cmd.run retry))
+      in
+      assert (recovered = loaded);
+      let (clicked, command), log =
+        capture_stdout (fun () ->
+            Directories.update failed (Directories.Click path))
+      in
+      assert (log = "");
+      assert (clicked = failed);
+      let (), log =
+        capture_stdout (fun () ->
+            assert (Cmd.run command = None);
+            assert (Cmd.run command = None))
+      in
+      let line = Printf.sprintf "Directory clicked: %S\n" path in
+      assert (log = line ^ line);
+      List.iter
+        (fun agent ->
+          Sys.chdir (Filename.dirname root);
+          let environment =
+            Remote_dev.Runtime.parse_args
+              [| "remote_dev"; "--agent"; agent; Filename.basename root |]
+          in
+          Sys.chdir cwd;
+          let initial, _ = Remote_dev.Home.init environment in
+          assert (initial.screen = Remote_dev.Home.Directories model);
+          with_emulator_screenshot ~available:false (fun () ->
+              Remote_dev.Server.initialize environment);
+          let started = Atomic.get Remote_dev.Server.state in
+          assert (started.screen = Remote_dev.Home.Directories loaded);
+          let status, body, content_type =
+            Remote_dev.Server.response environment `GET "/"
+          in
+          assert (status = `OK && content_type = "application/json");
+          let document = J.from_string body in
+          assert_root_split document "Directories" (fun _ -> ());
+          assert (has_text root document);
+          assert (
+            not
+              (has_text "Worktrees:" document
+              || has_text "OpenCode sessions:" document));
+          let click =
+            Remote_dev.Home.Directories_msg (Directories.Click path)
+          in
+          assert (has_event (home_event click) document);
+          let before = { started with emulator = selected_emulator } in
+          Atomic.set Remote_dev.Server.state before;
+          let (status, body, _), log =
+            capture_stdout (fun () ->
+                Remote_dev.Server.response environment
+                  ~body:(request_body click) `POST "/")
+          in
+          assert (status = `OK && log = line);
+          assert (
+            stream_documents body
+            = [ Remote_dev.Server.to_json environment before ]);
+          assert (Atomic.get Remote_dev.Server.state = before);
+          List.iter
+            (fun message ->
+              ignore
+                (Remote_dev.Server.response environment
+                   ~body:(request_body message) `POST "/");
+              assert (Atomic.get Remote_dev.Server.state = before))
+            [
+              Remote_dev.Home.Back;
+              Remote_dev.Home.Worktree_msg
+                (Home_components.Worktree.Run_prompt "stale");
+              Remote_dev.Home.Session_msg
+                (Home_components.Session.Run_prompt "stale");
+              Remote_dev.Home.Session_msg
+                (Home_components.Session.Run_prompt "/review");
+            ];
+          assert (
+            Remote_dev.Server.start_prompt_stream environment
+              (request_body
+                 (Remote_dev.Home.Worktree_msg
+                    (Home_components.Worktree.Run_prompt "stale")))
+            = None);
+          assert (
+            Remote_dev.Server.start_opencode_command environment
+              (request_body
+                 (Remote_dev.Home.Session_msg
+                    (Home_components.Session.Run_prompt "/review")))
+            = None);
+          let status, _, _ =
+            Remote_dev.Server.response environment
+              ~body:
+                (request_body
+                   (Remote_dev.Home.Directories_msg
+                      (Directories.Loaded (Ok [ "forged" ]))))
+              `POST "/"
+          in
+          assert (status = `Bad_request);
+          with_emulator_screenshot ~available:false (fun () ->
+              ignore
+                (Remote_dev.Server.response environment
+                   ~body:
+                     (request_body
+                        (Remote_dev.Home.Emulator_msg
+                           Home_components.Emulator.Refresh))
+                   `POST "/"));
+          assert ((Atomic.get Remote_dev.Server.state).screen = before.screen);
+          Atomic.set Remote_dev.Server.state before;
+          Sys.chdir cwd;
+          Unix.rmdir path;
+          let status, body, content_type =
+            Remote_dev.Server.response environment
+              ~body:(request_body Remote_dev.Home.Refresh)
+              `POST "/"
+          in
+          assert (status = `OK && content_type = "application/x-ndjson");
+          assert (List.length (stream_documents body) = 2);
+          let refreshed = Atomic.get Remote_dev.Server.state in
+          assert (refreshed.emulator = before.emulator);
+          assert (refreshed.screen = Remote_dev.Home.Directories model);
+          Unix.rmdir root;
+          ignore
+            (Remote_dev.Server.response environment
+               ~body:(request_body Remote_dev.Home.Refresh)
+               `POST "/");
+          (match (Atomic.get Remote_dev.Server.state).screen with
+          | Remote_dev.Home.Directories { error = Some _; entries = []; _ } ->
+              ()
+          | _ -> assert false);
+          with_emulator_screenshot ~available:false (fun () ->
+              Remote_dev.Server.initialize environment);
+          let status, body, _ =
+            Remote_dev.Server.response environment `GET "/"
+          in
+          assert (status = `OK);
+          assert (has_text root (J.from_string body));
+          assert (not (has_text "No subdirectories" (J.from_string body)));
+          (match (Atomic.get Remote_dev.Server.state).screen with
+          | Remote_dev.Home.Directories
+              { root = actual; error = Some _; entries = [] } ->
+              assert (actual = root)
+          | _ -> assert false);
+          Unix.mkdir root 0o700;
+          Unix.mkdir path 0o700;
+          ignore
+            (Remote_dev.Server.response environment
+               ~body:(request_body Remote_dev.Home.Refresh)
+               `POST "/");
+          assert ((Atomic.get Remote_dev.Server.state).screen = before.screen))
+        [ "claude"; "opencode" ]);
   let listed_worktree =
     {
       Home_components.Worktrees.worktrees =
@@ -361,6 +802,15 @@ let () =
       error = None;
     }
   in
+  List.iter
+    (fun (emulator, message) ->
+      assert_root_split (worktrees_document ~emulator listed_worktree)
+        "Worktrees:" (fun right -> assert (has_text message right)))
+    [
+      (initial_emulator, "No running emulators");
+      ({ selected_emulator with selected_emulator = None }, "Select an emulator");
+      ({ selected_emulator with error = Some "failed" }, "Error: failed");
+    ];
   (match
      find_weighted_column
        (`List [ `Int 0; `Int 0; `Int 0; `Int 1 ])
@@ -386,6 +836,50 @@ let () =
     "New worktree" (fun right ->
       assert (has_image "/emulators/emulator-5554/screenshot.png" right));
   let worktree = initial_worktree "/tmp/clicked" in
+  let rec has_button_column buttons = function
+    | Remote_dev.Components.Column (stretch, _, _, _, _, _, _, children) ->
+        (stretch && children = buttons)
+        || List.exists (has_button_column buttons) children
+    | Remote_dev.Components.Row (_, _, _, _, _, _, children) ->
+        List.exists (has_button_column buttons) children
+    | _ -> false
+  in
+  assert (
+    has_button_column
+      (List.map
+         (fun label ->
+           Remote_dev.Components.button
+             ~event:(Home_components.Worktree.Set_prompt label) label)
+         [ "/igor-pending-reviews"; "/igor-restart-mr-tests" ])
+      (Home_components.Worktree.view worktree));
+  let voiced, cmd =
+    Home_components.Worktree.update worktree
+      (Home_components.Worktree.Set_prompt "voice")
+  in
+  assert (voiced.prompt = "voice" && Cmd.run cmd = None);
+  let assert_voice_row label value set_prompt view =
+    let open Remote_dev.Components in
+    match view with
+    | Column (_, _, _, _, _, _, _, children) ->
+        assert (
+          List.exists
+            (function
+              | Row
+                  ( Some [ 1; 0 ],
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    [ Edit (name, Some text, _); Voice_input event ] ) ->
+                  name = label && text = value && event = set_prompt
+              | _ -> false)
+            children)
+    | _ -> assert false
+  in
+  assert_voice_row "Commands" "voice"
+    (Home_components.Worktree.Set_prompt "__VALUE__")
+    (Home_components.Worktree.view voiced);
   let assert_worktree_layout ?output ?error ~shortcuts document =
     match
       find_weighted_column
@@ -554,6 +1048,14 @@ let () =
   let selected_document =
     Remote_dev.Server.to_json opencode_environment selected_home
   in
+  let voiced, cmd =
+    Home_components.Session.update loaded_model
+      (Home_components.Session.Set_prompt "voice")
+  in
+  assert (voiced.prompt = "voice" && Cmd.run cmd = None);
+  assert_voice_row "Prompt" "voice"
+    (Home_components.Session.Set_prompt "__VALUE__")
+    (Home_components.Session.view voiced);
   assert (has_text "User: question" selected_document);
   assert (has_text "Assistant: answer" selected_document);
   assert (has_text "Needs input in OpenCode" selected_document);
@@ -587,7 +1089,7 @@ let () =
   let initial_opencode, _ = Remote_dev.Home.init opencode_environment in
   assert (
     match initial_opencode.screen with
-    | Remote_dev.Home.Sessions { sessions = []; error = None } -> true
+    | Remote_dev.Home.Directories { entries = []; error = None; _ } -> true
     | _ -> false);
   let listed, cmd =
     Remote_dev.Home.update opencode_environment selected_home
@@ -839,14 +1341,16 @@ let () =
     with
     | Error _ -> true
     | Ok _ -> false);
-  let initial, cmd = Remote_dev.Home.init claude_environment in
+  let startup_environment =
+    Remote_dev.Runtime.parse_args [| "remote_dev"; "--agent"; "claude" |]
+  in
+  let initial, cmd = Remote_dev.Home.init startup_environment in
   assert (initial.emulator = initial_emulator);
   assert (
     match initial.screen with
-    | Remote_dev.Home.Worktrees { worktrees = []; error = None } -> true
-    | Remote_dev.Home.Worktrees _ | Remote_dev.Home.New_worktree _
-    | Remote_dev.Home.Worktree _ ->
-        false);
+    | Remote_dev.Home.Directories { entries = []; error = None; root } ->
+        root = Sys.getcwd ()
+    | _ -> false);
   let initialized =
     match with_emulator_screenshot ~available:true (fun () -> Cmd.run cmd) with
     | Some
@@ -858,25 +1362,27 @@ let () =
     | _ -> assert false
   in
   let initialized_state, cmd =
-    Remote_dev.Home.update claude_environment initial initialized
+    Remote_dev.Home.update startup_environment initial initialized
   in
-  assert (initialized_state.emulator.selected_emulator = Some "emulator-5554");
+  assert (initialized_state.emulator.selected_emulator = None);
   assert (
-    match with_process (fun () -> Cmd.run cmd) with
-    | Some (Remote_dev.Home.Worktrees_msg (Home_components.Worktrees.Loaded _))
-      ->
+    match Cmd.run cmd with
+    | Some
+        (Remote_dev.Home.Directories_msg
+           (Home_components.Directories.Loaded (Ok _))) ->
         true
     | _ -> false);
   let failed_state, cmd =
-    Remote_dev.Home.update claude_environment initial
+    Remote_dev.Home.update startup_environment initial
       (Remote_dev.Home.Initialize_emulator
          (Home_components.Emulator.Loaded (Error "adb failed")))
   in
   assert (failed_state.emulator.error = Some "adb failed");
   assert (
-    match with_process (fun () -> Cmd.run cmd) with
-    | Some (Remote_dev.Home.Worktrees_msg (Home_components.Worktrees.Loaded _))
-      ->
+    match Cmd.run cmd with
+    | Some
+        (Remote_dev.Home.Directories_msg
+           (Home_components.Directories.Loaded (Ok _))) ->
         true
     | _ -> false);
   Atomic.set Remote_dev.Server.state initialized_state;
@@ -888,17 +1394,15 @@ let () =
       (Cmd.Run
          (fun () ->
            Some
-             (Remote_dev.Home.Worktrees_msg
-                (Home_components.Worktrees.Loaded (Error "failed")))))
+             (Remote_dev.Home.Directories_msg
+                (Home_components.Directories.Loaded (Error "failed")))))
     |> stream_documents
   in
   assert (List.length documents = 2);
   assert (
     match (Atomic.get Remote_dev.Server.state).screen with
-    | Remote_dev.Home.Worktrees { error = Some "failed"; _ } -> true
-    | Remote_dev.Home.Worktrees _ | Remote_dev.Home.New_worktree _
-    | Remote_dev.Home.Worktree _ ->
-        false);
+    | Remote_dev.Home.Directories { error = Some "failed"; _ } -> true
+    | _ -> false);
   assert (
     has_event
       (home_event
@@ -1051,7 +1555,11 @@ let () =
   assert (
     Remote_dev.Server.to_json claude_environment listed
     = worktrees_document ~emulator:selected_emulator listed_worktrees);
-  Remote_dev.Server.reset claude_environment;
+  Atomic.set Remote_dev.Server.state
+    {
+      screen = Remote_dev.Home.Worktrees initial_worktrees;
+      emulator = initial_emulator;
+    };
   let status, body, _ =
     Remote_dev.Server.response claude_environment
       ~body:
@@ -1274,11 +1782,9 @@ let () =
   assert (content_type = "application/json");
   assert (
     match Atomic.get Remote_dev.Server.state with
-    | { screen = Remote_dev.Home.Worktrees model; emulator } ->
-        J.from_string body = worktrees_document ~emulator model
-    | { screen = Remote_dev.Home.New_worktree _; _ }
-    | { screen = Remote_dev.Home.Worktree _; _ } ->
-        false);
+    | { screen = Remote_dev.Home.Directories model; emulator } ->
+        J.from_string body = directories_document ~emulator model
+    | _ -> false);
   let status, body, content_type =
     Remote_dev.Server.response claude_environment `GET "/"
   in
@@ -1286,19 +1792,14 @@ let () =
   assert (content_type = "application/json");
   assert (
     match Atomic.get Remote_dev.Server.state with
-    | { screen = Remote_dev.Home.Worktrees model; emulator } ->
-        J.from_string body = worktrees_document ~emulator model
-    | { screen = Remote_dev.Home.New_worktree _; _ }
-    | { screen = Remote_dev.Home.Worktree _; _ } ->
-        false);
+    | { screen = Remote_dev.Home.Directories model; emulator } ->
+        J.from_string body = directories_document ~emulator model
+    | _ -> false);
   let previous = J.from_string body in
   let status, body, content_type =
-    with_process (fun () ->
-        Remote_dev.Server.response claude_environment
-          ~body:
-            (request_body
-               (Remote_dev.Home.Worktrees_msg Home_components.Worktrees.Load))
-          `POST "/")
+    Remote_dev.Server.response claude_environment
+      ~body:(request_body Remote_dev.Home.Refresh)
+      `POST "/"
   in
   assert (status = `OK);
   assert (content_type = "application/x-ndjson");
@@ -1307,18 +1808,16 @@ let () =
   assert (List.hd documents = previous);
   assert (
     match Atomic.get Remote_dev.Server.state with
-    | { screen = Remote_dev.Home.Worktrees model; emulator } ->
-        List.hd (List.rev documents) = worktrees_document ~emulator model
-    | { screen = Remote_dev.Home.New_worktree _; _ }
-    | { screen = Remote_dev.Home.Worktree _; _ } ->
-        false);
+    | { screen = Remote_dev.Home.Directories model; emulator } ->
+        List.hd (List.rev documents) = directories_document ~emulator model
+    | _ -> false);
   Remote_dev.Server.reset claude_environment;
   with_failed_emulator_load (fun () ->
-      Remote_dev.Server.initialize claude_environment);
+      Remote_dev.Server.initialize startup_environment);
   assert (
     match Atomic.get Remote_dev.Server.state with
     | {
-     screen = Remote_dev.Home.Worktrees { worktrees = _ :: _; _ };
+     screen = Remote_dev.Home.Directories { error = None; _ };
      emulator = { error = Some _; _ };
     } ->
         true
@@ -1342,8 +1841,7 @@ let () =
       `POST "/"
   in
   assert (status = `OK);
-  assert (
-    J.from_string body = worktrees_document { worktrees = []; error = None });
+  assert (J.from_string body = directories_document initial_directories);
   let next, cmd =
     Remote_dev.Home.update claude_environment
       {
@@ -1375,13 +1873,12 @@ let () =
       `POST "/"
   in
   assert (status = `OK);
-  assert (
-    J.from_string body = worktrees_document { worktrees = []; error = None });
+  assert (J.from_string body = directories_document initial_directories);
   Remote_dev.Server.reset claude_environment;
   assert (
     match (Atomic.get Remote_dev.Server.state).screen with
-    | Remote_dev.Home.Worktrees _ -> true
-    | Remote_dev.Home.New_worktree _ | Remote_dev.Home.Worktree _ -> false);
+    | Remote_dev.Home.Directories _ -> true
+    | _ -> false);
   let model = initial_worktree "/tmp/clicked" in
   let emulators =
     [
@@ -1401,7 +1898,11 @@ let () =
       (Home_components.Emulator.Loaded (Ok emulators))
   in
   assert (Cmd.run cmd = None);
-  assert (emulator.selected_emulator = Some "emulator-5554");
+  assert (emulator.selected_emulator = None);
+  let emulator, _ =
+    Home_components.Emulator.update emulator
+      (Home_components.Emulator.Select "emulator-5554")
+  in
   let emulator_document =
     Remote_dev.Components.to_json Home_components.Emulator.msg_to_yojson
       (Home_components.Emulator.view emulator)
@@ -1429,7 +1930,7 @@ let () =
       (Home_components.Emulator.Loaded (Ok []))
   in
   assert (Cmd.run cmd = None);
-  assert (empty.selected_emulator = None);
+  assert (empty.selected_emulator = Some "emulator-5554");
   assert (
     not
       (has_image "/emulators/emulator-5554/screenshot.png"
@@ -1441,6 +1942,69 @@ let () =
   in
   assert (Cmd.run cmd = None);
   assert (failed.error = Some "failed");
+  assert (failed.emulators = emulator.emulators);
+  assert (failed.selected_emulator = emulator.selected_emulator);
+  let refreshing, cmd =
+    Home_components.Emulator.update failed Home_components.Emulator.Refresh
+  in
+  assert (refreshing = failed);
+  let result =
+    with_emulator_screenshot ~available:true (fun () -> Cmd.run cmd)
+    |> Option.get
+  in
+  let retried, _ = Home_components.Emulator.update refreshing result in
+  assert (retried.error = None);
+  assert (retried.selected_emulator = emulator.selected_emulator);
+  let renamed =
+    { Remote_dev.Runtime.serial = "emulator-5556"; name = "Renamed" }
+  in
+  List.iter
+    (fun devices ->
+      let refreshed, _ =
+        Home_components.Emulator.update selected
+          (Home_components.Emulator.Loaded (Ok devices))
+      in
+      assert (refreshed.emulators = devices);
+      assert (refreshed.selected_emulator = Some "emulator-5556"))
+    [ List.rev emulators; [ renamed ]; [ List.hd emulators ]; []; emulators ];
+  let emulator_view model =
+    Remote_dev.Components.to_json Home_components.Emulator.msg_to_yojson
+      (Home_components.Emulator.view model)
+  in
+  let unselected = { emulator with selected_emulator = None } in
+  let missing = { emulator with emulators = [ List.nth emulators 1 ] } in
+  List.iter
+    (fun (model, message, image) ->
+      let document = emulator_view model in
+      assert (
+        has_event
+          (Home_components.Emulator.msg_to_yojson
+             Home_components.Emulator.Refresh)
+          document);
+      Option.iter (fun message -> assert (has_text message document)) message;
+      assert (
+        has_image "/emulators/emulator-5554/screenshot.png" document = image))
+    [
+      (initial_emulator, Some "No running emulators", false);
+      (unselected, Some "Select an emulator", false);
+      (emulator, None, true);
+      (missing, Some "Selected emulator unavailable", false);
+      (empty, Some "Selected emulator unavailable", false);
+      (failed, Some "Error: failed", true);
+    ];
+  assert (
+    has_event
+      (Home_components.Emulator.msg_to_yojson
+         (Home_components.Emulator.Select "emulator-5556"))
+      (emulator_view missing));
+  let replacement, _ =
+    Home_components.Emulator.update missing
+      (Home_components.Emulator.Select "emulator-5556")
+  in
+  assert (replacement.selected_emulator = Some "emulator-5556");
+  assert (
+    has_image "/emulators/emulator-5556/screenshot.png"
+      (emulator_view replacement));
   let initialized_worktree, cmd =
     Home_components.Worktree.init "/tmp/clicked"
   in
@@ -1449,6 +2013,120 @@ let () =
   let home =
     { Remote_dev.Home.screen = Remote_dev.Home.Worktree model; emulator }
   in
+  let tap_event =
+    Remote_dev.Home.Emulator_msg
+      (Home_components.Emulator.Tap ("emulator-5554", "__VALUE__"))
+  in
+  let tap_payload = {|{"x":540,"y":960,"width":1080,"height":1920}|} in
+  let tap_body payload =
+    J.to_string
+      (`Assoc
+         [
+           ("event", Remote_dev.Home.msg_to_yojson tap_event);
+           ("value", `String payload);
+         ])
+  in
+  assert (
+    Remote_dev.Server.decode (tap_body tap_payload)
+    = Ok
+        (Remote_dev.Home.Emulator_msg
+           (Home_components.Emulator.Tap ("emulator-5554", tap_payload))));
+  assert (
+    has_event
+      (Remote_dev.Home.msg_to_yojson tap_event)
+      (Remote_dev.Server.to_json claude_environment home));
+  Atomic.set Remote_dev.Server.state home;
+  let send_tap (status : Unix.process_status) =
+    let calls = ref 0 in
+    let response =
+      try
+        Remote_dev.Server.response claude_environment
+          ~body:(tap_body tap_payload) `POST "/"
+      with effect Remote_dev.Runtime.Process_lines (process, _), k ->
+        assert (
+          process
+          = Remote_dev.Runtime.Args
+              ( "adb",
+                [|
+                  "adb";
+                  "-s";
+                  "emulator-5554";
+                  "shell";
+                  "input";
+                  "tap";
+                  "540";
+                  "960";
+                |] ));
+        incr calls;
+        Effect.Deep.continue k status
+    in
+    assert (!calls = 1);
+    let status, body, content_type = response in
+    assert (status = `OK && content_type = "application/x-ndjson");
+    let documents = stream_documents body in
+    assert (List.length documents = 2);
+    assert (
+      List.for_all
+        (has_image "/emulators/emulator-5554/screenshot.png")
+        documents);
+    let after = Atomic.get Remote_dev.Server.state in
+    assert (after.screen = home.screen);
+    assert (after.emulator.emulators = home.emulator.emulators);
+    assert (after.emulator.selected_emulator = home.emulator.selected_emulator);
+    (after, List.nth documents 1)
+  in
+  let success, _ = send_tap (Unix.WEXITED 0) in
+  assert (success = home);
+  let failure, document = send_tap (Unix.WEXITED 1) in
+  assert (Option.is_some failure.emulator.error);
+  assert (has_text ("Error: " ^ Option.get failure.emulator.error) document);
+  let retry, _ = send_tap (Unix.WEXITED 0) in
+  assert (retry = home);
+  List.iter
+    (fun payload ->
+      Atomic.set Remote_dev.Server.state home;
+      let status, _, _ =
+        Remote_dev.Server.response claude_environment ~body:(tap_body payload)
+          `POST "/"
+      in
+      assert (status = `OK);
+      let after = Atomic.get Remote_dev.Server.state in
+      assert (after.screen = home.screen);
+      assert (
+        after.emulator = { emulator with error = Some "Invalid emulator tap" }))
+    [
+      "not json";
+      "null";
+      "{}";
+      {|{"x":1.5,"y":0,"width":1080,"height":1920}|};
+      {|{"x":"1","y":0,"width":1080,"height":1920}|};
+      {|{"x":-1,"y":0,"width":1080,"height":1920}|};
+      {|{"x":1080,"y":0,"width":1080,"height":1920}|};
+      {|{"x":0,"y":1920,"width":1080,"height":1920}|};
+      {|{"x":0,"y":0,"width":0,"height":1920}|};
+      {|{"x":0,"y":0,"width":1080,"height":-1}|};
+    ];
+  List.iter
+    (fun emulator ->
+      let state = { home with emulator } in
+      Atomic.set Remote_dev.Server.state state;
+      ignore
+        (Remote_dev.Server.response claude_environment
+           ~body:(tap_body tap_payload) `POST "/");
+      assert (Atomic.get Remote_dev.Server.state = state))
+    [ selected; unselected; missing ];
+  List.iter
+    (fun message ->
+      let status, _, _ =
+        Remote_dev.Server.response claude_environment
+          ~body:(request_body message) `POST "/"
+      in
+      assert (status = `Bad_request))
+    [
+      Remote_dev.Home.Emulator_msg (Home_components.Emulator.Tapped (Ok ()));
+      Remote_dev.Home.Initialize_emulator
+        (Home_components.Emulator.Tapped (Error "forged"));
+    ];
   let emulator_document = Remote_dev.Server.to_json claude_environment home in
   assert (
     has_event
@@ -1657,6 +2335,54 @@ let () =
           "/emulators/emulator-5554/screenshot.png")
   in
   assert (status = `Not_found);
+  assert (Atomic.get Remote_dev.Server.state = selected);
+  let refresh_event =
+    Remote_dev.Home.Emulator_msg Home_components.Emulator.Refresh
+  in
+  let refresh available =
+    let before = Atomic.get Remote_dev.Server.state in
+    assert (
+      has_event (home_event refresh_event)
+        (Remote_dev.Server.to_json claude_environment before));
+    let status, body, content_type =
+      with_emulator_screenshot ~available (fun () ->
+          Remote_dev.Server.response claude_environment
+            ~body:(request_body refresh_event)
+            `POST "/")
+    in
+    assert (status = `OK);
+    assert (content_type = "application/x-ndjson");
+    let documents =
+      String.split_on_char '\n' body
+      |> List.filter (fun line -> line <> "")
+      |> List.map J.from_string
+    in
+    assert (List.length documents = 2);
+    let after = Atomic.get Remote_dev.Server.state in
+    assert (after.screen = before.screen);
+    assert (after.emulator.selected_emulator = before.emulator.selected_emulator);
+    let document = List.nth documents 1 in
+    assert (document = Remote_dev.Server.to_json claude_environment after);
+    assert (
+      match (root_panes (List.hd documents), root_panes document) with
+      | Some (before_left, _), Some (after_left, _) -> before_left = after_left
+      | _ -> false);
+    document
+  in
+  let missing_document = refresh false in
+  assert (has_text "Selected emulator unavailable" missing_document);
+  assert (
+    not (has_image "/emulators/emulator-5554/screenshot.png" missing_document));
+  let missing = Atomic.get Remote_dev.Server.state in
+  let navigated, _ =
+    Remote_dev.Home.update claude_environment missing Remote_dev.Home.Back
+  in
+  assert (navigated.emulator = missing.emulator);
+  assert (has_image "/emulators/emulator-5554/screenshot.png" (refresh true));
+  with_emulator_screenshot ~available:true (fun () ->
+      with_process (fun () -> Remote_dev.Server.initialize claude_environment));
+  assert ((Atomic.get Remote_dev.Server.state).emulator.selected_emulator = None);
+  assert (has_text "Select an emulator" (refresh true));
   let status, _, _ =
     Remote_dev.Server.response claude_environment `GET
       "/emulators/emulator-5554/other.png"

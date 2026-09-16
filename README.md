@@ -1,6 +1,6 @@
 # remote_dev
 
-`remote_dev` is a local development tool for browsing Claude worktrees or attaching an Android client to existing sessions from a local OpenCode server.
+`remote_dev` is a local development tool with an Android client. Both agent modes start with a list of up to ten recently modified subdirectories beside an emulator panel. The backend also contains Claude worktree and OpenCode session screens; the current startup screen does not navigate to them.
 
 ## Security
 
@@ -16,6 +16,7 @@ Android client
     | POST / (JSON UI events)
     v
 OCaml / Eio server on :8080
+    |-- Startup: immediate subdirectories of the supplied path (default: working directory)
     |-- Claude: git worktrees and claude --print stream-json
     |-- OpenCode: HTTP API on 127.0.0.1:4096
     `-- adb devices and screencap for selected Android emulators
@@ -26,9 +27,8 @@ The server returns a backend-defined UI document. The Android client renders tha
 ## Prerequisites
 
 - A POSIX environment with Dune 3.24 or newer. Dune obtains the OCaml compiler and project dependencies from `dune.lock` on the first build.
-- Git.
-- For `--agent claude`, the `claude` CLI installed, authenticated, and available on `PATH`.
-- For `--agent opencode`, OpenCode 1.18.20 or newer installed and authenticated.
+- Git and an authenticated `claude` CLI on `PATH` for the existing Claude worktree screens; neither is needed for the startup directory list.
+- OpenCode 1.18.20 or newer, installed and authenticated, for the existing OpenCode session screens; no OpenCode server is needed for the startup directory list.
 - Android Platform Tools (`adb`) on `PATH` when using emulator screenshots.
 - Android Studio or an Android SDK setup that can build the `android/` Gradle project.
 - An Android device on the same trusted LAN as the backend.
@@ -41,22 +41,32 @@ Build the project:
 make build
 ```
 
-Claude accepts an optional Git repository root and defaults to the current directory:
+Select the agent at startup and optionally pass a directory for the startup list. Both modes accept one positional path. Without it, the list uses the backend process's startup working directory. Relative paths are resolved against that working directory once at startup. In Claude mode the path also serves as the repository root; unlike earlier versions, it now determines the directory-list root too:
 
 ```sh
 make run ARGS="--agent claude /path/to/repository"
 make run ARGS="--agent claude"
 ```
 
-For OpenCode, first start the fixed localhost server, optionally attach its terminal UI, then start remote_dev without a repository root:
+OpenCode mode accepts the same optional directory path and starts without a running OpenCode server:
+
+```sh
+make run ARGS="--agent opencode /path/to/projects"
+make run ARGS="--agent opencode"
+```
+
+The startup list shows only immediate real subdirectories, including hidden directories and excluding files and symbolic links. It orders them by each directory's own modification time, newest first, with case-sensitive name ordering for ties, and shows at most ten. Changes inside nested files do not determine the order. An empty root shows `No subdirectories`.
+
+Tap a directory to log its absolute path to the backend console; this does not select it, change screens, or start an agent. Pull-to-refresh or the app's `Refresh` menu reloads the directory list from the captured startup path. System Back stays on this screen. A directory-read failure displays an error and retains the last successful list; refresh retries it. The emulator panel's own refresh is independent.
+
+The following commands support the existing OpenCode session screens, which currently have no navigation entry from the directory screen:
 
 ```sh
 opencode serve --hostname 127.0.0.1 --port 4096
 opencode attach http://127.0.0.1:4096
-make run ARGS="--agent opencode"
 ```
 
-`opencode attach` is optional and can run in another terminal, but it is required to answer permissions or questions. OpenCode mode rejects a positional repository root. It lists the 20 most recently updated sessions across all projects known to the server and does not create sessions. Older sessions remain in OpenCode history.
+`opencode attach` is required to answer permissions or questions. In OpenCode mode the positional path only selects the startup directory-list root; session directories remain server-defined. When active, its session-list screen lists the 20 most recently updated sessions across all projects known to the server, independently of this path, and does not create sessions. Older sessions remain in OpenCode history.
 
 If the OpenCode server uses a password, the remote_dev backend must inherit the same `OPENCODE_SERVER_PASSWORD`. Export it in each terminal before starting its process; setting it only for `opencode serve` does not pass it to a separately started backend. For example, after setting the variable in the backend's terminal:
 
@@ -67,7 +77,7 @@ make run ARGS="--agent opencode"
 
 The backend sends Basic authentication on every OpenCode request when the password is non-empty, always using the username `opencode`. An unset or empty password sends no authorization header. Restart the backend after changing its environment. HTTP 401 means the server rejected the request's authentication.
 
-The selected agent cannot be changed without restarting remote_dev. The backend does not start or stop `opencode serve` and reports connection or protocol errors in the UI. It listens on all IPv4 interfaces at port `8080`.
+The selected agent cannot be changed without restarting remote_dev. The backend does not start or stop `opencode serve`; connection or protocol errors are reported on the relevant session screen. The directory screen makes no agent requests. The backend listens on all IPv4 interfaces at port `8080`.
 
 ## Build The Android Client
 
@@ -96,7 +106,7 @@ On Android 17 and later, grant the app Local Network Access permission before it
 
 ## HTTP Protocol
 
-The server loads running ADB emulators once, then loads the initial Claude worktree list or the OpenCode session list before accepting HTTP requests. The client starts a UI session with `GET /`, which returns the current document as `application/json`.
+The server loads running ADB emulators once, then loads the directory list in both agent modes before accepting HTTP requests. Emulator loading errors do not prevent directory loading. The client starts a UI session with `GET /`, which returns the current document as `application/json`.
 
 Interactive UI nodes use `POST /` with a JSON event envelope. The client copies the
 event value advertised by the node into `event`:
@@ -109,7 +119,9 @@ event value advertised by the node into `event`:
 ```
 
 `value` is either a string or `null`; the server substitutes a string value for the
-`"__VALUE__"` marker in an input event. Pull-to-refresh always sends the provider-neutral root `Refresh` event. It reloads the current Claude worktree list, OpenCode all-server session list, or selected OpenCode session. Finite load commands return `application/x-ndjson` with documents before and after the load.
+`"__VALUE__"` marker in an input event. Pull-to-refresh always sends the provider-neutral root `Refresh` event. It reloads the startup directory list or, when active, the existing Claude worktree list, OpenCode all-server session list, or selected OpenCode session. Finite load commands return `application/x-ndjson` with documents before and after the load.
+
+Directory buttons advertise events such as `["Directories_msg",["Click","/projects/example"]]`. Processing one writes a single escaped path log line to backend stdout and returns an NDJSON document with unchanged UI state. Internal directory-load results cannot be submitted by clients.
 
 A Claude prompt returns `application/x-ndjson`. Each nonempty line is a compact complete UI document with the current response accumulated so far; the Android client replaces its displayed document for every line until the response closes. If Claude fails after the stream starts, the final document contains the error.
 
@@ -130,6 +142,24 @@ seconds. Each image source is a `GET /emulators/<serial>/screenshot.png` respons
 with `image/png` and `Cache-Control: no-store`; a stopped or unknown emulator returns
 a non-success response.
 
+Tap the selected emulator's preview to send a single tap through ADB. The client
+converts the position within the painted image to source PNG pixels, ignoring
+empty margins. For example, a tap at the center of a 1080 by 1920 screenshot sends:
+
+```json
+{
+  "event": ["Emulator_msg", ["Tap", "emulator-5554", "__VALUE__"]],
+  "value": "{\"x\":540,\"y\":960,\"width\":1080,\"height\":1920}"
+}
+```
+
+The backend validates integer coordinates against the supplied bitmap dimensions
+and only sends input when the event's serial is still selected and listed. ADB
+failures appear in the emulator panel. Taps share the existing UI request lock:
+while another request is in progress, taps are ignored rather than queued. Drags
+and cancelled gestures do not send taps. The result appears on a subsequent
+three-second screenshot refresh; a tap does not request an immediate screenshot.
+
 The UI document supports these nodes:
 
 - `column`: vertically arranged `children`. An optional `weights` array makes the
@@ -143,7 +173,10 @@ The UI document supports these nodes:
 - `button`: a `label` string and optional backend `event`.
 - `input`: a `label`, backend `event`, and optional initial `text`.
 - `image`: a backend-relative `src` path beginning with `/` but not `//`, plus a
-  `label`. The client resolves it against the configured backend origin.
+  `label` and optional backend `event` array. The client resolves the source against
+  the configured backend origin. With an event, a single tap submits it unchanged
+  with a string `value` encoding integer `x`, `y`, `width`, and `height` fields in
+  JSON. Without an event, the image remains display-only.
 
 Every screen uses one root weighted row with the current screen first and the
 emulator panel second:

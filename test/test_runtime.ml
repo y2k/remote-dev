@@ -106,6 +106,45 @@ let has_usage message =
   |> List.exists (String.starts_with ~prefix:"Usage:")
 
 let () =
+  let root = Filename.temp_dir "remote-dev-directories-" "" in
+  let path = Filename.concat root in
+  let rec remove path =
+    if (Unix.lstat path).st_kind = Unix.S_DIR then (
+      Sys.readdir path
+      |> Array.iter (fun name -> remove (Filename.concat path name));
+      Unix.rmdir path)
+    else Unix.unlink path
+  in
+  Fun.protect
+    ~finally:(fun () -> remove root)
+    (fun () ->
+      let load () = Remote_dev.Runtime.load_directories root in
+      let directory name time =
+        Unix.mkdir (path name) 0o700;
+        Unix.utimes (path name) time time
+      in
+      assert (load () = []);
+      directory ".hidden" 1.;
+      directory "older" 2.;
+      directory "newer" 3.;
+      close_out (open_out (path "file"));
+      Unix.symlink (path "newer") (path "link");
+      Unix.mkdir (path "older/nested") 0o700;
+      Unix.utimes (path "older") 2. 2.;
+      Unix.utimes (path "older/nested") 10000. 10000.;
+      assert (load () = [ "newer"; "older"; ".hidden" ]);
+      List.iter (fun name -> directory name 4.) [ "b"; "a" ];
+      assert (load () = [ "a"; "b"; "newer"; "older"; ".hidden" ]);
+      List.init 9 (fun i -> Printf.sprintf "recent-%02d" i)
+      |> List.iteri (fun i name -> directory name (float_of_int (10 + i)));
+      assert (
+        load ()
+        = List.init 9 (fun i -> Printf.sprintf "recent-%02d" (8 - i)) @ [ "a" ]);
+      assert (
+        try
+          ignore (Remote_dev.Runtime.load_directories (path "file"));
+          false
+        with Unix.Unix_error _ | Sys_error _ -> true));
   (if Array.length Sys.argv = 1 then
      let environment =
        Unix.environment () |> Array.to_list
@@ -140,14 +179,34 @@ let () =
   assert (claude = Remote_dev.Runtime.Claude { root = Sys.getcwd () });
   assert (
     Remote_dev.Runtime.parse_args [| "remote_dev"; "--agent"; "opencode" |]
-    = Remote_dev.Runtime.OpenCode);
-  assert (
-    try
-      ignore
-        (Remote_dev.Runtime.parse_args
-           [| "remote_dev"; "--agent"; "opencode"; "/tmp/repository" |]);
-      false
-    with Arg.Bad message -> has_usage message);
+    = Remote_dev.Runtime.OpenCode { root = Sys.getcwd () });
+  List.iter
+    (fun agent ->
+      let parse paths =
+        Remote_dev.Runtime.parse_args
+          (Array.of_list ([ "remote_dev"; "--agent"; agent ] @ paths))
+      in
+      List.iter
+        (fun (paths, root) ->
+          let expected =
+            if agent = "claude" then Remote_dev.Runtime.Claude { root }
+            else Remote_dev.Runtime.OpenCode { root }
+          in
+          assert (parse paths = expected))
+        [
+          ([], Sys.getcwd ());
+          ([ "/tmp/repository" ], "/tmp/repository");
+          ([ "team" ], Filename.concat (Sys.getcwd ()) "team");
+        ];
+      let missing = Filename.temp_file "remote-dev-missing-" "" in
+      Sys.remove missing;
+      ignore (parse [ missing ]);
+      assert (
+        try
+          ignore (parse [ "/first"; "/second" ]);
+          false
+        with Arg.Bad message -> has_usage message))
+    [ "claude"; "opencode" ];
   assert (
     try
       ignore (Remote_dev.Runtime.parse_args [| "remote_dev" |]);
@@ -546,6 +605,29 @@ let () =
            (fun () -> Remote_dev.Runtime.load_worktrees root));
       false
     with Failure _ -> true);
+  let check_tap = function
+    | Remote_dev.Runtime.Args ("adb", argv) ->
+        assert (
+          argv
+          = [|
+              "adb";
+              "-s";
+              "emulator-5554";
+              "shell";
+              "input";
+              "tap";
+              "540";
+              "960";
+            |])
+    | _ -> assert false
+  in
+  let tap () = Remote_dev.Runtime.tap_emulator "emulator-5554" ~x:540 ~y:960 in
+  with_process ~check:check_tap [] (Unix.WEXITED 0) tap;
+  assert (
+    try
+      with_process ~check:check_tap [] (Unix.WEXITED 1) tap;
+      false
+    with Failure message -> message = "emulator tap failed");
   let emulators = with_emulator_processes Remote_dev.Runtime.load_emulators in
   assert (
     emulators
