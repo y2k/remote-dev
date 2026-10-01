@@ -19,7 +19,7 @@
  (description
   "Browse Git worktrees from an Android client and send prompts to the locally installed Claude CLI.")
   (depends
-    (ocaml (>= 5.3))
+    (ocaml (and (>= 5.5) (< 5.6)))
    eio
    eio_main
    base64
