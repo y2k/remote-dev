@@ -3,6 +3,7 @@ open Home_components
 
 type screen =
   | Directories of Directories.model
+  | Project_tabs of Project_tabs.model
   | Worktrees of Worktrees.model
   | New_worktree of Worktrees.model * New_worktree.model
   | Worktree of Worktree.model
@@ -15,6 +16,7 @@ type msg =
   | Back
   | Refresh
   | Directories_msg of Directories.msg
+  | Project_tabs_msg of Project_tabs.msg
   | Worktrees_msg of Worktrees.msg
   | New_worktree_msg of New_worktree.msg
   | Worktree_msg of Worktree.msg
@@ -29,6 +31,8 @@ let view environment { screen; emulator } =
     match screen with
     | Directories model ->
         Components.map directories_msg (Directories.view model)
+    | Project_tabs model ->
+        Components.map project_tabs_msg (Project_tabs.view model)
     | Worktrees model -> Components.map worktrees_msg (Worktrees.view model)
     | New_worktree (_, model) ->
         Components.map new_worktree_msg (New_worktree.view model)
@@ -51,6 +55,7 @@ let view environment { screen; emulator } =
     ]
 
 let lift_directories = Cmd.map directories_msg
+let lift_project_tabs = Cmd.map project_tabs_msg
 let lift_worktrees = Cmd.map worktrees_msg
 let lift_new_worktree = Cmd.map new_worktree_msg
 let lift_worktree = Cmd.map worktree_msg
@@ -60,11 +65,11 @@ let lift_emulator = Cmd.map emulator_msg
 
 let init environment =
   let emulator, cmd = Emulator.init () in
-  let root =
+  let screen =
     match environment with
-    | Runtime.Claude { root } | Runtime.OpenCode { root } -> root
+    | Runtime.Claude { root } -> Directories (Directories.init root |> fst)
+    | Runtime.OpenCode { root } -> Project_tabs (Project_tabs.init root |> fst)
   in
-  let screen = Directories (Directories.init root |> fst) in
   ({ screen; emulator }, Cmd.map initialize_emulator cmd)
 
 let update_page state screen lift update model message =
@@ -77,6 +82,18 @@ let claude_root = function
 
 let update environment ({ screen; _ } as state) message =
   match (screen, message) with
+  | Project_tabs _, Initialize_emulator message ->
+      let emulator, _ = Emulator.update state.emulator message in
+      ({ state with emulator }, Cmd.none)
+  | Project_tabs model, Refresh ->
+      update_page state
+        (fun model -> Project_tabs model)
+        lift_project_tabs Project_tabs.update model Project_tabs.Refresh
+  | Project_tabs model, Project_tabs_msg message ->
+      update_page state
+        (fun model -> Project_tabs model)
+        lift_project_tabs Project_tabs.update model message
+  | Project_tabs _, Back -> (state, Cmd.none)
   | Directories model, Initialize_emulator message ->
       let emulator, _ = Emulator.update state.emulator message in
       update_page { state with emulator }

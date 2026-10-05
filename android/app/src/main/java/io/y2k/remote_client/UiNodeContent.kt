@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -193,6 +194,7 @@ fun UiNodeContent(
             val gaps = rememberGapDrawing(node, node.gap, node.children.size, horizontal = true)
             Row(
                 modifier = (if (node.weights == null) modifier else modifier.fillMaxWidth())
+                    .then(if (node.horizontalScroll) Modifier.horizontalScroll(rememberScrollState()) else Modifier)
                     .containerDecoration(node.background, node.border, node.cornerRadius).padding(
                         node.padding.start.dp, node.padding.top.dp, node.padding.end.dp, node.padding.bottom.dp,
                     ).then(gaps?.modifier(themeColor(node.gap.color)) ?: Modifier),

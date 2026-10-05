@@ -1,10 +1,4 @@
-# startup-directory-list Specification
-
-## Purpose
-
-Показывает при запуске приложения до десяти недавно изменённых непосредственных подкаталогов рабочей директории backend в отдельной области слева от эмулятора.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Use the backend startup working directory
 The application SHALL use the optional positional startup path as the directory-list root in both Claude and OpenCode modes. When omitted, the root SHALL default to the backend process working directory captured at startup. A relative path SHALL be resolved against that startup working directory and the resulting absolute root SHALL be retained for initial loading, refresh, display, and directory-row click paths. Listing SHALL NOT require a Git repository or a reachable agent service. An unreadable root SHALL follow the existing directory-component load-error behavior rather than fall back to the working directory. In OpenCode mode the root SHALL be captured at startup but SHALL first be read and displayed when the user creates a tab.
@@ -39,30 +33,6 @@ The application SHALL use the optional positional startup path as the directory-
 - **THEN** the backend remains available and the directory component displays the selected absolute root and a load error
 - **AND** refresh retries that root without substituting the working directory
 
-### Requirement: Show the ten most recently modified immediate directories
-The directory list SHALL contain at most ten real immediate subdirectories of its root, ordered by each directory's own filesystem modification time descending. Equal modification times SHALL be ordered by name using case-sensitive bytewise ascending comparison. Hidden directories SHALL be included. Files and symbolic links SHALL be excluded. The application SHALL NOT recursively inspect descendants to determine activity. It SHALL display each selected directory's name and SHALL display an explicit empty state when there are no eligible directories.
-
-#### Scenario: More than ten directories
-- **WHEN** the root contains twelve eligible directories with distinct modification times
-- **THEN** the list contains exactly the ten newest directories in descending modification-time order
-
-#### Scenario: Fewer than ten directories
-- **WHEN** the root contains three eligible directories
-- **THEN** the list contains all three in the specified order
-
-#### Scenario: Equal modification times
-- **WHEN** eligible directories have equal modification times, including at the tenth-entry boundary
-- **THEN** name ordering determines their stable order and which entries are included
-
-#### Scenario: Files, links, and nested directories
-- **WHEN** the root contains a file, a symbolic link to a directory, a hidden real directory, and a real directory containing nested directories
-- **THEN** only the hidden real directory and the immediate real directory are eligible from those entries
-- **AND** nested directories are not separate rows and their timestamps do not affect sorting
-
-#### Scenario: Empty list
-- **WHEN** the root contains no eligible directories
-- **THEN** the component states that there are no subdirectories
-
 ### Requirement: Render a distinct directory component beside the emulator
 In Claude mode the startup document SHALL render a distinct directory-list component as the left content pane and the existing emulator panel as the right pane. In OpenCode mode the startup document SHALL render an empty tab UI on the left; the directory component SHALL appear in the active tab only after a tab is created. Whenever displayed, the directory component SHALL display its root path and clickable directory-name rows, each advertising an event identifying that directory's absolute path. The layout SHALL retain the existing `2:1` content-to-emulator width ratio and themed divider. The initial document SHALL NOT display the worktree list or OpenCode session list. The emulator panel SHALL be common to all tabs.
 
@@ -79,22 +49,6 @@ In Claude mode the startup document SHALL render a distinct directory-list compo
 #### Scenario: No emulator or emulator error
 - **WHEN** the emulator panel is empty or reports an error
 - **THEN** the directory component, or empty tab UI when no tab exists, remains visible in the left pane with the same layout ratio
-
-### Requirement: Log a directory click without changing state
-When the backend processes a click event advertised by a directory row, it SHALL write one console log entry identifying the clicked directory's absolute path. It SHALL return a UI document with unchanged application state, including directory entries, errors, and emulator state. A click SHALL NOT select or highlight a directory, navigate, reload directories, or invoke an agent. Path control characters SHALL be escaped in the log so that one click produces one log line.
-
-#### Scenario: Click a directory
-- **WHEN** the client activates the row for `/projects/example` and the backend processes its click event
-- **THEN** the backend console receives one log entry identifying `/projects/example`
-- **AND** the returned UI retains the same screen and state without navigation, directory reload, or agent execution
-
-#### Scenario: Repeat a click
-- **WHEN** the backend processes two successive clicks on the same directory row
-- **THEN** it writes one log entry for each click and retains the same application state
-
-#### Scenario: Directory name contains a line break
-- **WHEN** the backend processes a click on a directory whose name contains a line break
-- **THEN** the log escapes the line break and contains the path within one log line
 
 ### Requirement: Refresh the directory component independently
 The root `Refresh` event on the standalone directory screen SHALL reload and re-sort directories from the captured root. On the OpenCode tab UI it SHALL reload the common directory list if at least one tab exists and SHALL perform no directory load if zero tabs exist. Refresh SHALL preserve tabs, active selection and emulator state and SHALL NOT load worktrees or OpenCode sessions. `Back` on these screens SHALL keep the UI unchanged without an error. Directory contents SHALL be read at initialization in Claude mode, when creating the first tab from zero tabs in OpenCode mode, and on applicable explicit root refresh, without a directory polling timer. Creating additional tabs or selecting a tab SHALL reuse the common list. The emulator panel's own refresh SHALL remain independent.

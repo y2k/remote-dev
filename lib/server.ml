@@ -44,6 +44,9 @@ let decode body =
       | Ok (Home.Emulator_msg (Emulator.Tapped _))
       | Ok (Home.Initialize_emulator (Emulator.Tapped _))
       | Ok (Home.Directories_msg (Directories.Loaded _))
+      | Ok
+          (Home.Project_tabs_msg
+             (Project_tabs.Directories_msg (Directories.Loaded _)))
       | Ok (Home.Sessions_msg (Sessions.Loaded _))
       | Ok (Home.Session_msg (Session.Loaded _))
       | Ok (Home.Session_msg Session.Missing)
@@ -94,8 +97,8 @@ let start_prompt_stream environment body =
       match next.screen with
       | Home.Worktree { path; session_id; _ } ->
           Some { cwd = path; prompt; session_id }
-      | Home.Directories _ | Home.Worktrees _ | Home.New_worktree _
-      | Home.Sessions _ | Home.Session _ ->
+      | Home.Project_tabs _ | Home.Directories _ | Home.Worktrees _
+      | Home.New_worktree _ | Home.Sessions _ | Home.Session _ ->
           None)
   | (Runtime.Claude _ | Runtime.OpenCode _), (Ok _ | Error _) -> None
 
@@ -116,8 +119,8 @@ let start_opencode_command environment body =
           match next.screen with
           | Home.Session (_, { session; _ }) ->
               Some { session; command; arguments }
-          | Home.Directories _ | Home.Worktrees _ | Home.New_worktree _
-          | Home.Worktree _ | Home.Sessions _ ->
+          | Home.Project_tabs _ | Home.Directories _ | Home.Worktrees _
+          | Home.New_worktree _ | Home.Worktree _ | Home.Sessions _ ->
               None))
   | (Runtime.Claude _ | Runtime.OpenCode _), (Ok _ | Error _) -> None
 

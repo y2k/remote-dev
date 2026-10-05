@@ -1,6 +1,6 @@
 # remote_dev
 
-`remote_dev` is a local development tool with an Android client. Both agent modes start with a list of up to ten recently modified subdirectories beside an emulator panel. The backend also contains Claude worktree and OpenCode session screens; the current startup screen does not navigate to them.
+`remote_dev` is a local development tool with an Android client. OpenCode mode starts with zero project tabs and a shared emulator panel; creating a tab shows up to ten recently modified subdirectories. Claude mode starts directly with that directory list. The backend also contains Claude worktree and OpenCode session screens; project-list clicks do not navigate to them.
 
 ## Security
 
@@ -16,7 +16,8 @@ Android client
     | POST / (JSON UI events)
     v
 OCaml / Eio server on :8080
-    |-- Startup: immediate subdirectories of the supplied path (default: working directory)
+    |-- OpenCode startup: empty tabs; first tab loads the supplied directory root
+    |-- Claude startup: immediate subdirectories of the supplied root
     |-- Claude: git worktrees and claude --print stream-json
     |-- OpenCode: HTTP API on 127.0.0.1:4096
     `-- adb devices and screencap for selected Android emulators
@@ -34,6 +35,19 @@ The server returns a backend-defined UI document. The Android client renders tha
 - An Android device on the same trusted LAN as the backend.
 
 ## Run The Backend
+
+### OpenCode project tabs
+
+OpenCode starts with zero tabs. The `+` button creates and selects a tab labelled
+`Tab N`. Tabs appear in a single horizontal strip above the project list; overflow
+scrolls horizontally while `+` stays visible on the right. Select a tab by its
+label; `*` and a themed background mark the active tab. `X` removes it.
+Closing the active tab selects the next tab, or the previous one if it was last.
+All tabs can be closed. Tab numbers are not reused until the backend restarts.
+
+Tabs share the same project list for the startup root. They do not open projects
+or agent sessions. Tabs and selection live only in backend memory: reloading or
+reconnecting the client preserves them, restarting the backend clears them.
 
 Build the project:
 
@@ -57,7 +71,7 @@ make run ARGS="--agent opencode"
 
 The startup list shows only immediate real subdirectories, including hidden directories and excluding files and symbolic links. It orders them by each directory's own modification time, newest first, with case-sensitive name ordering for ties, and shows at most ten. Changes inside nested files do not determine the order. An empty root shows `No subdirectories`.
 
-Tap a directory to log its absolute path to the backend console; this does not select it, change screens, or start an agent. Pull-to-refresh or the app's `Refresh` menu reloads the directory list from the captured startup path. System Back stays on this screen. A directory-read failure displays an error and retains the last successful list; refresh retries it. The emulator panel's own refresh is independent.
+Tap a directory to log its absolute path to the backend console; this does not select it, change screens, or start an agent. The first OpenCode tab created from zero tabs loads the directory list; additional tabs and tab switches reuse it. Pull-to-refresh or the app's `Refresh` menu sends a common event and replaces the complete UI. The backend reloads the shared directory list from the captured startup path when tabs exist, preserving tabs and selection. With zero tabs it returns the empty tab UI without reading directories. In Claude mode it reloads the standalone directory list. System Back preserves the current directory/tab screen. A directory-read failure displays an error and retains the last successful list and any open tabs; refresh retries it. The emulator panel's own refresh is independent.
 
 The following commands support the existing OpenCode session screens, which currently have no navigation entry from the directory screen:
 
@@ -96,6 +110,10 @@ cd android
 ./gradlew assembleDebug
 ```
 
+For project tabs, install the updated Android client before updating the backend:
+the tab strip requires the client's generic `horizontalScroll` row support.
+The updated client continues to render older documents without that property.
+
 Override the local value for one build when needed:
 
 ```sh
@@ -106,7 +124,7 @@ On Android 17 and later, grant the app Local Network Access permission before it
 
 ## HTTP Protocol
 
-The server loads running ADB emulators once, then loads the directory list in both agent modes before accepting HTTP requests. Emulator loading errors do not prevent directory loading. The client starts a UI session with `GET /`, which returns the current document as `application/json`.
+The server loads running ADB emulators once. Claude mode also loads directories before accepting HTTP requests; OpenCode mode initializes zero tabs and defers directory loading until the first tab is created. Emulator loading errors do not prevent tab creation or directory loading. The client fetches the current in-memory UI with `GET /`, which returns `application/json` without resetting state.
 
 Interactive UI nodes use `POST /` with a JSON event envelope. The client copies the
 event value advertised by the node into `event`:
@@ -119,9 +137,9 @@ event value advertised by the node into `event`:
 ```
 
 `value` is either a string or `null`; the server substitutes a string value for the
-`"__VALUE__"` marker in an input event. Pull-to-refresh always sends the provider-neutral root `Refresh` event. It reloads the startup directory list or, when active, the existing Claude worktree list, OpenCode all-server session list, or selected OpenCode session. Finite load commands return `application/x-ndjson` with documents before and after the load.
+`"__VALUE__"` marker in an input event. Pull-to-refresh always sends the provider-neutral root `Refresh` event without a tab identifier. It reloads the common list when tabs exist (no directory read with zero tabs), the standalone directory list, or, when active, the existing Claude worktree list, OpenCode all-server session list, or selected OpenCode session. Finite load commands return `application/x-ndjson` with documents before and after the load.
 
-Directory buttons advertise events such as `["Directories_msg",["Click","/projects/example"]]`. Processing one writes a single escaped path log line to backend stdout and returns an NDJSON document with unchanged UI state. Internal directory-load results cannot be submitted by clients.
+Tab controls advertise `["Project_tabs_msg",["Create"]]`, `["Project_tabs_msg",["Select",1]]`, or `["Project_tabs_msg",["Close",1]]`. Directory buttons inside tabs advertise events such as `["Project_tabs_msg",["Directories_msg",["Click","/projects/example"]]]`; standalone directory buttons omit the outer wrapper. Processing a directory click writes a single escaped path log line to backend stdout and returns an NDJSON document with unchanged UI state. Internal directory-load results, including nested tab results, cannot be submitted by clients.
 
 A Claude prompt returns `application/x-ndjson`. Each nonempty line is a compact complete UI document with the current response accumulated so far; the Android client replaces its displayed document for every line until the response closes. If Claude fails after the stream starts, the final document contains the error.
 
@@ -169,6 +187,10 @@ The UI document supports these nodes:
 - `row`: horizontally arranged `children`. Its optional `weights` array makes the row
   fill the available width. Zero-weight children keep their content width and
   positive-weight children divide the remaining width proportionally.
+  Optional boolean `horizontalScroll` (default `false`) enables horizontal scrolling
+  within the width allocated by its parent. A scrolling row cannot specify `weights`;
+  use an outer weighted row to allocate its viewport and keep sibling controls fixed.
+  Non-boolean values, including null, and scrolling rows with weights are rejected.
 - `text`: a `text` string.
 - `button`: a `label` string and optional backend `event`.
 - `input`: a `label`, backend `event`, and optional initial `text`.

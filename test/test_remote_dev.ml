@@ -114,6 +114,316 @@ module App = struct
 end
 
 let () =
+  let module Server = Remote_dev.Server in
+  let module Home = Remote_dev.Home in
+  let module Tabs = Home_components.Project_tabs in
+  let root = Filename.temp_dir "remote-dev-tabs-http-" "" in
+  let project = Filename.concat root "project" in
+  let environment = Remote_dev.Runtime.OpenCode { root } in
+  let rec contains key value = function
+    | `Assoc fields ->
+        List.assoc_opt key fields = Some value
+        || List.exists (fun (_, v) -> contains key value v) fields
+    | `List values -> List.exists (contains key value) values
+    | _ -> false
+  in
+  let request message =
+    J.to_string
+      (`Assoc [ ("event", Home.msg_to_yojson message); ("value", `Null) ])
+  in
+  let post message =
+    Server.response environment ~body:(request message) `POST "/"
+  in
+  let tabs () =
+    match (Atomic.get Server.state).screen with
+    | Home.Project_tabs model -> model
+    | _ -> assert false
+  in
+  Fun.protect
+    ~finally:(fun () ->
+      Unix.rmdir project;
+      Unix.rmdir root)
+    (fun () ->
+      Unix.mkdir project 0o700;
+      with_emulator_screenshot ~available:true (fun () ->
+          Server.initialize environment);
+      let status, body, media = Server.response environment `GET "/" in
+      assert (status = `OK && media = "application/json");
+      let initial = J.from_string body in
+      assert (
+        contains "event"
+          (Home.msg_to_yojson (Home.Project_tabs_msg Tabs.Create))
+          initial);
+      assert (not (contains "text" (`String "Directories") initial));
+      assert ((tabs ()).tabs = [] && (tabs ()).directories.entries = []);
+      ignore
+        (post
+           (Home.Emulator_msg (Home_components.Emulator.Select "emulator-5554")));
+      let emulator = (Atomic.get Server.state).emulator in
+      let status, body, media = post (Home.Project_tabs_msg Tabs.Create) in
+      assert (status = `OK && media = "application/x-ndjson");
+      let documents =
+        String.split_on_char '\n' body
+        |> List.filter (( <> ) "")
+        |> List.map J.from_string
+      in
+      assert (List.length documents = 2);
+      let loaded = List.nth documents 1 in
+      assert (contains "text" (`String root) loaded);
+      assert (contains "label" (`String "project") loaded);
+      assert ((tabs ()).directories.entries = [ "project" ]);
+      assert (
+        contains "event"
+          (Home.msg_to_yojson (Home.Project_tabs_msg (Tabs.Select 1)))
+          loaded);
+      assert (
+        contains "event"
+          (Home.msg_to_yojson (Home.Project_tabs_msg (Tabs.Close 1)))
+          loaded);
+      let click =
+        Home.Project_tabs_msg
+          (Tabs.Directories_msg (Home_components.Directories.Click project))
+      in
+      assert (contains "event" (Home.msg_to_yojson click) loaded);
+      let before = Atomic.get Server.state in
+      let (_, _, _), log = capture_stdout (fun () -> post click) in
+      assert (
+        log = Printf.sprintf "Directory clicked: %S\n" project
+        && Atomic.get Server.state = before);
+      let status, _, _ =
+        post
+          (Home.Project_tabs_msg
+             (Tabs.Directories_msg
+                (Home_components.Directories.Loaded (Ok [ "forged" ]))))
+      in
+      assert (status = `Bad_request && Atomic.get Server.state = before);
+      List.iter
+        (fun message ->
+          ignore (post message);
+          assert (Atomic.get Server.state = before))
+        [
+          Home.Session_msg (Home_components.Session.Run_prompt "stale");
+          Home.Session_msg (Home_components.Session.Run_prompt "/review");
+          Home.Worktree_msg (Home_components.Worktree.Run_prompt "stale");
+        ];
+      ignore (post (Home.Project_tabs_msg Tabs.Create));
+      ignore (post (Home.Project_tabs_msg (Tabs.Select 1)));
+      let before = Atomic.get Server.state in
+      ignore (Server.response environment `GET "/");
+      ignore (post Home.Refresh);
+      assert (Atomic.get Server.state = before && (tabs ()).active = Some 1);
+      ignore (post (Home.Project_tabs_msg (Tabs.Close 1)));
+      assert ((tabs ()).tabs = [ 2 ] && (tabs ()).active = Some 2);
+      ignore (post (Home.Project_tabs_msg (Tabs.Close 2)));
+      let status, body, media = post Home.Refresh in
+      assert (status = `OK && media = "application/json");
+      assert (not (contains "text" (`String "Directories") (J.from_string body)));
+      assert ((Atomic.get Server.state).emulator = emulator);
+      ignore (post (Home.Project_tabs_msg Tabs.Create));
+      assert ((tabs ()).tabs = [ 3 ]);
+      with_emulator_screenshot ~available:false (fun () ->
+          Server.initialize environment);
+      assert ((tabs ()).tabs = [] && (tabs ()).active = None))
+
+let () =
+  let module Home = Remote_dev.Home in
+  let module Tabs = Home_components.Project_tabs in
+  let environment =
+    Remote_dev.Runtime.OpenCode { root = "/missing-tab-root" }
+  in
+  let initial, command = Home.init environment in
+  assert (
+    match initial.screen with
+    | Home.Project_tabs { tabs = []; active = None; _ } -> true
+    | _ -> false);
+  let message =
+    with_emulator_screenshot ~available:true (fun () ->
+        Cmd.run command |> Option.get)
+  in
+  let initialized, command = Home.update environment initial message in
+  assert (Cmd.run command = None);
+  assert (List.length initialized.emulator.emulators = 1);
+  let selected, _ =
+    Home.update environment initialized
+      (Home.Emulator_msg (Home_components.Emulator.Select "emulator-5554"))
+  in
+  List.iter
+    (fun message ->
+      let next, cmd = Home.update environment selected message in
+      assert (next = selected && Cmd.run cmd = None))
+    [ Home.Back; Home.Refresh ];
+  let created, command =
+    Home.update environment selected (Home.Project_tabs_msg Tabs.Create)
+  in
+  assert (created.emulator = selected.emulator);
+  let loaded, _ =
+    Home.update environment created (Cmd.run command |> Option.get)
+  in
+  assert (
+    match loaded.screen with
+    | Home.Project_tabs
+        {
+          tabs = [ 1 ];
+          active = Some 1;
+          directories = { error = Some _; _ };
+          _;
+        } ->
+        true
+    | _ -> false);
+  let back, cmd = Home.update environment loaded Home.Back in
+  assert (back = loaded && Cmd.run cmd = None);
+  let refreshed, command = Home.update environment loaded Home.Refresh in
+  let refreshed, _ =
+    Home.update environment refreshed (Cmd.run command |> Option.get)
+  in
+  assert (refreshed.emulator = selected.emulator);
+  let deleted, command =
+    Home.update environment refreshed (Home.Project_tabs_msg (Tabs.Close 1))
+  in
+  assert (deleted.emulator = selected.emulator && Cmd.run command = None);
+  assert (
+    match deleted.screen with
+    | Home.Project_tabs { tabs = []; active = None; _ } -> true
+    | _ -> false)
+
+let () =
+  let module Tabs = Home_components.Project_tabs in
+  let initial, cmd = Tabs.init "/missing-project-root" in
+  assert (initial.tabs = [] && initial.active = None && Cmd.run cmd = None);
+  let step model message = Tabs.update model message |> fst in
+  let one = step initial Tabs.Create in
+  assert (one.tabs = [ 1 ] && one.active = Some 1);
+  let two = step one Tabs.Create in
+  let three = step two Tabs.Create in
+  assert (three.tabs = [ 1; 2; 3 ] && three.active = Some 3);
+  let selected = step three (Tabs.Select 2) in
+  assert (selected.tabs = [ 1; 2; 3 ] && selected.active = Some 2);
+  let inactive_deleted = step selected (Tabs.Close 1) in
+  assert (inactive_deleted.tabs = [ 2; 3 ] && inactive_deleted.active = Some 2);
+  let middle_deleted = step selected (Tabs.Close 2) in
+  assert (middle_deleted.tabs = [ 1; 3 ] && middle_deleted.active = Some 3);
+  let last_deleted = step middle_deleted (Tabs.Close 3) in
+  assert (last_deleted.tabs = [ 1 ] && last_deleted.active = Some 1);
+  let empty = step last_deleted (Tabs.Close 1) in
+  assert (empty.tabs = [] && empty.active = None);
+  let recreated = step empty Tabs.Create in
+  assert (recreated.tabs = [ 4 ] && recreated.active = Some 4);
+  assert (step recreated (Tabs.Select 2) = recreated);
+  assert (step recreated (Tabs.Close 2) = recreated)
+
+let () =
+  let module Tabs = Home_components.Project_tabs in
+  let root = Filename.temp_dir "remote-dev-tabs-" "" in
+  let path = Filename.concat root "project" in
+  Fun.protect
+    ~finally:(fun () ->
+      if Sys.file_exists path then Unix.rmdir path;
+      if Sys.file_exists root then Unix.rmdir root)
+    (fun () ->
+      Unix.mkdir path 0o700;
+      let empty, _ = Tabs.init root in
+      assert (Cmd.run (snd (Tabs.update empty Tabs.Refresh)) = None);
+      let first, load = Tabs.update empty Tabs.Create in
+      let loaded = Tabs.update first (Option.get (Cmd.run load)) |> fst in
+      assert (loaded.directories.entries = [ "project" ]);
+      let two, cmd = Tabs.update loaded Tabs.Create in
+      assert (Cmd.run cmd = None);
+      let selected, cmd = Tabs.update two (Tabs.Select 1) in
+      assert (Cmd.run cmd = None && selected.directories = loaded.directories);
+      let (clicked, cmd), log =
+        capture_stdout (fun () ->
+            Tabs.update selected
+              (Tabs.Directories_msg (Home_components.Directories.Click path)))
+      in
+      assert (clicked = selected && log = "");
+      let result, log = capture_stdout (fun () -> Cmd.run cmd) in
+      assert (
+        result = None && log = Printf.sprintf "Directory clicked: %S\n" path);
+      Unix.rmdir path;
+      Unix.rmdir root;
+      let refreshing, cmd = Tabs.update selected Tabs.Refresh in
+      let failed = Tabs.update refreshing (Option.get (Cmd.run cmd)) |> fst in
+      assert (failed.tabs = [ 1; 2 ] && failed.active = Some 1);
+      assert (
+        failed.directories.entries = [ "project" ]
+        && Option.is_some failed.directories.error);
+      Unix.mkdir root 0o700;
+      let retrying, cmd = Tabs.update failed Tabs.Refresh in
+      let recovered = Tabs.update retrying (Option.get (Cmd.run cmd)) |> fst in
+      assert (
+        recovered.directories.entries = [] && recovered.directories.error = None);
+      let switched, cmd = Tabs.update recovered (Tabs.Select 2) in
+      assert (Cmd.run cmd = None && switched.directories = recovered.directories);
+      let empty = Tabs.update switched (Tabs.Close 1) |> fst in
+      let empty = Tabs.update empty (Tabs.Close 2) |> fst in
+      Unix.rmdir root;
+      let created, cmd = Tabs.update empty Tabs.Create in
+      let failed = Tabs.update created (Option.get (Cmd.run cmd)) |> fst in
+      assert (failed.active = Some 3 && Option.is_some failed.directories.error))
+
+let () =
+  let open Remote_dev.Components in
+  let scroll =
+    row ~horizontal_scroll:true [ button ~event:1 "Tab 1" ]
+    |> map string_of_int
+    |> to_json (fun value -> `String value)
+  in
+  assert (J.Util.member "horizontalScroll" scroll = `Bool true);
+  assert (
+    J.Util.member "children" scroll
+    |> J.Util.to_list |> List.hd |> J.Util.member "event" = `String "1");
+  assert (J.Util.member "horizontalScroll" (to_json Fun.id (row [])) = `Null);
+  assert (
+    try
+      ignore (row ~horizontal_scroll:true ~weights:[] []);
+      false
+    with Invalid_argument _ -> true)
+
+let () =
+  let module Tabs = Home_components.Project_tabs in
+  let json model =
+    Tabs.view model |> Remote_dev.Components.to_json Tabs.msg_to_yojson
+  in
+  let children node = J.Util.member "children" node |> J.Util.to_list in
+  let initial, _ = Tabs.init "/projects" in
+  let empty = json initial in
+  let strip = children empty |> List.hd in
+  let viewport, add =
+    match children strip with
+    | [ viewport; add ] -> (viewport, add)
+    | _ -> assert false
+  in
+  assert (J.Util.member "weights" strip = `List [ `Int 1; `Int 0 ]);
+  assert (J.Util.member "horizontalScroll" viewport = `Bool true);
+  assert (children viewport = []);
+  assert (J.Util.member "label" add = `String "+");
+  assert (J.Util.member "event" add = Tabs.msg_to_yojson Tabs.Create);
+  assert (List.length (children empty) = 1);
+  let first = Tabs.update initial Tabs.Create |> fst in
+  let second = Tabs.update first Tabs.Create |> fst in
+  let document = json second in
+  let strip = children document |> List.hd in
+  let tabs = children strip |> List.hd |> children in
+  assert (List.length tabs = 2);
+  List.iteri
+    (fun index tab ->
+      let id = index + 1 in
+      match children tab with
+      | [ select; close ] ->
+          assert (
+            J.Util.member "event" select = Tabs.msg_to_yojson (Tabs.Select id));
+          assert (
+            J.Util.member "event" close = Tabs.msg_to_yojson (Tabs.Close id))
+      | _ -> assert false)
+    tabs;
+  assert (
+    J.Util.member "background" (List.nth tabs 1) = `String "primaryContainer");
+  assert (List.length (children document) = 2);
+  let closed = Tabs.update second (Tabs.Close 2) |> fst in
+  let closed = Tabs.update closed (Tabs.Close 1) |> fst in
+  assert (List.length (children (json closed)) = 1)
+
+let () =
   assert (
     let open Remote_dev.Components in
     column [ row [ voice_input ~event:() ] ]
@@ -794,7 +1104,7 @@ let () =
                ~body:(request_body Remote_dev.Home.Refresh)
                `POST "/");
           assert ((Atomic.get Remote_dev.Server.state).screen = before.screen))
-        [ "claude"; "opencode" ]);
+        [ "claude" ]);
   let listed_worktree =
     {
       Home_components.Worktrees.worktrees =
@@ -840,7 +1150,7 @@ let () =
     | Remote_dev.Components.Column (stretch, _, _, _, _, _, _, children) ->
         (stretch && children = buttons)
         || List.exists (has_button_column buttons) children
-    | Remote_dev.Components.Row (_, _, _, _, _, _, children) ->
+    | Remote_dev.Components.Row (_, _, _, _, _, _, _, children) ->
         List.exists (has_button_column buttons) children
     | _ -> false
   in
@@ -865,7 +1175,8 @@ let () =
           List.exists
             (function
               | Row
-                  ( Some [ 1; 0 ],
+                  ( _,
+                    Some [ 1; 0 ],
                     _,
                     _,
                     _,
@@ -1089,7 +1400,7 @@ let () =
   let initial_opencode, _ = Remote_dev.Home.init opencode_environment in
   assert (
     match initial_opencode.screen with
-    | Remote_dev.Home.Directories { entries = []; error = None; _ } -> true
+    | Remote_dev.Home.Project_tabs { tabs = []; active = None; _ } -> true
     | _ -> false);
   let listed, cmd =
     Remote_dev.Home.update opencode_environment selected_home

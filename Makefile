@@ -8,6 +8,7 @@ build:
 
 .PHONY: run
 run:
+	@pids=$$(lsof -tiTCP:8080 -sTCP:LISTEN); if [ -n "$$pids" ]; then kill $$pids; fi
 	dune exec remote_dev -- $(ARGS)
 
 .PHONY: watch

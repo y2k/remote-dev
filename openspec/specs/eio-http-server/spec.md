@@ -22,11 +22,15 @@ The system SHALL serve the current initial UI through `GET /` on port `8080` wit
 - **THEN** the system returns `404 Not Found`
 
 ### Requirement: In-memory UI state
-The system SHALL maintain one confirmed UI state in server memory for its single local client. Before accepting HTTP requests, it SHALL initialize that state to the directory-list screen in both Claude and OpenCode modes, with either loaded entries or a directory-load error, and it SHALL discard the state when the server stops. Initial screen loading SHALL NOT request Git worktrees or OpenCode sessions. A `Refresh` event SHALL reload directories on the directory screen or the existing dynamic data for a provider-specific list or detail screen when that screen is active.
+The system SHALL maintain one confirmed UI state in server memory for its single local client and discard it when the server stops. Before accepting HTTP requests, it SHALL initialize Claude mode to the directory-list screen with loaded entries or a directory-load error, and OpenCode mode to an empty tab UI with zero tabs and no directory load. Initial screen loading SHALL NOT request Git worktrees or OpenCode sessions. A `Refresh` event SHALL reload the common directory list when the OpenCode tab UI has tabs, leave the empty tab UI intact when it has none, reload directories on the standalone directory screen, or reload the existing dynamic data for an active provider-specific list or detail screen. Every response SHALL remain a complete UI document or sequence of complete UI documents; Refresh and GET SHALL NOT reset tab state.
 
 #### Scenario: Initial directory screen
-- **WHEN** the backend starts in either supported agent mode
+- **WHEN** the backend starts in Claude mode
 - **THEN** it loads the directory-list screen before accepting requests, without loading worktrees or OpenCode sessions
+
+#### Scenario: Initial OpenCode tab UI
+- **WHEN** the backend starts in OpenCode mode
+- **THEN** it initializes zero tabs before accepting requests without loading directories, worktrees, or OpenCode sessions
 
 #### Scenario: Select a worktree
 - **WHEN** the backend runs in Claude mode, the current UI session displays the worktree list, and the client sends an advertised worktree-selection event
@@ -38,11 +42,12 @@ The system SHALL maintain one confirmed UI state in server memory for its single
 
 #### Scenario: Refresh the current screen
 - **WHEN** the client sends `Refresh`
-- **THEN** the system reloads directories if the directory screen is active, or the existing dynamic data for the active provider-specific list or detail screen, and returns the resulting UI document
+- **THEN** the system reloads the common directory list if tabs exist, no directories if the tab UI is empty, directories if the standalone directory screen is active, or the existing dynamic data for the active provider-specific list or detail screen
+- **AND** it returns the resulting complete UI without resetting tabs or selection
 
 #### Scenario: Server restarts
 - **WHEN** the server starts after a previous process has stopped
-- **THEN** it loads a fresh directory-list screen from the new process's startup working directory before accepting requests and does not retain the previous UI state
+- **THEN** OpenCode starts with zero tabs and Claude loads a fresh directory-list screen using its captured startup root, without retaining the previous UI state
 
 ### Requirement: Advertise backend-defined events
 The system SHALL advertise an event object on each interactive UI node that performs an action. A worktree button's event object SHALL identify the worktree path to select. An input node's event object SHALL identify the command submission action. The system SHALL interpret an input event's string `value` as the submitted text.

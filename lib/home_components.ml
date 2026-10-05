@@ -48,6 +48,97 @@ module Directories = struct
               None) )
 end
 
+module Project_tabs = struct
+  type model = {
+    tabs : int list;
+    active : int option;
+    next_id : int;
+    directories : Directories.model;
+  }
+
+  type msg =
+    | Create
+    | Select of int
+    | Close of int
+    | Refresh
+    | Directories_msg of Directories.msg
+  [@@deriving yojson, variants]
+
+  let init root =
+    ( {
+        tabs = [];
+        active = None;
+        next_id = 1;
+        directories = fst (Directories.init root);
+      },
+      Cmd.none )
+
+  let update_directories model message =
+    let directories, cmd = Directories.update model.directories message in
+    ({ model with directories }, Cmd.map directories_msg cmd)
+
+  let view model =
+    let tabs =
+      List.map
+        (fun id ->
+          let active = model.active = Some id in
+          let label = Printf.sprintf "Tab %d" id in
+          row
+            ~background:(if active then Primary_container else Surface)
+            [
+              button ~event:(Select id) (if active then "* " ^ label else label);
+              button ~event:(Close id) "X";
+            ])
+        model.tabs
+    in
+    let strip =
+      row ~weights:[ 1; 0 ]
+        [ row ~horizontal_scroll:true tabs; button ~event:Create "+" ]
+    in
+    column ~stretch:true
+      (strip
+      ::
+      (match model.active with
+      | None -> []
+      | Some _ ->
+          [
+            Components.map directories_msg (Directories.view model.directories);
+          ]))
+
+  let update model = function
+    | Create ->
+        ( {
+            model with
+            tabs = model.tabs @ [ model.next_id ];
+            active = Some model.next_id;
+            next_id = model.next_id + 1;
+          },
+          if model.tabs = [] then
+            Cmd.map directories_msg (Directories.load model.directories.root)
+          else Cmd.none )
+    | Select id when List.mem id model.tabs ->
+        ({ model with active = Some id }, Cmd.none)
+    | Close id when List.mem id model.tabs ->
+        let rec neighbor previous = function
+          | current :: next :: _ when current = id -> Some next
+          | [ current ] when current = id -> previous
+          | current :: rest -> neighbor (Some current) rest
+          | [] -> None
+        in
+        ( {
+            model with
+            tabs = List.filter (( <> ) id) model.tabs;
+            active =
+              (if model.active = Some id then neighbor None model.tabs
+               else model.active);
+          },
+          Cmd.none )
+    | Refresh when model.tabs <> [] -> update_directories model Directories.Load
+    | Directories_msg message when model.tabs <> [] ->
+        update_directories model message
+    | Select _ | Close _ | Refresh | Directories_msg _ -> (model, Cmd.none)
+end
+
 module New_worktree = struct
   type model = { error : string option }
 

@@ -46,7 +46,7 @@ In OpenCode mode the backend SHALL obtain OpenCode session data from an independ
 - **THEN** directory loading proceeds independently without an OpenCode request
 
 ### Requirement: List existing OpenCode sessions
-When active, the OpenCode session-list screen SHALL list at most the 20 most recently updated sessions across projects returned by the connected server, newest first. The backend SHALL request a single page with a limit of 20 and SHALL load statuses only for the returned sessions' contexts. Older sessions SHALL remain in OpenCode history. Each row SHALL display the session title, directory, and current status, and SHALL select that exact session when activated. The screen SHALL NOT list Git worktrees or provide a control for creating an OpenCode session. This screen SHALL NOT be the startup root screen; startup SHALL show the common directory-list screen instead.
+When active, the OpenCode session-list screen SHALL list at most the 20 most recently updated sessions across projects returned by the connected server, newest first. The backend SHALL request a single page with a limit of 20 and SHALL load statuses only for the returned sessions' contexts. Older sessions SHALL remain in OpenCode history. Each row SHALL display the session title, directory, and current status, and SHALL select that exact session when activated. The screen SHALL NOT list Git worktrees or provide a control for creating an OpenCode session. This screen SHALL NOT be the startup root screen; OpenCode startup SHALL show the empty tab UI instead. Tab controls and project-list clicks SHALL NOT navigate to this session-list screen.
 
 #### Scenario: Server has sessions from multiple directories
 - **WHEN** the active session-list screen loads sessions belonging to different directories from the connected server
@@ -63,7 +63,7 @@ When active, the OpenCode session-list screen SHALL list at most the 20 most rec
 
 #### Scenario: Backend starts in OpenCode mode
 - **WHEN** the backend initializes in OpenCode mode
-- **THEN** it displays the directory-list screen instead of loading the session-list screen
+- **THEN** it displays zero tabs and the tab creation control instead of loading the session-list screen
 
 ### Requirement: Render the selected session transcript
 Selecting an OpenCode session SHALL load its messages using the session ID and directory supplied by the server. The selected-session screen SHALL display the session title, directory, current status, and all user and assistant text parts in conversation order. Non-text parts SHALL NOT be rendered.

@@ -52,7 +52,8 @@ type 'event t =
       * int option
       * 'event t list
   | Row of
-      int list option
+      bool
+      * int list option
       * theme_color option
       * Padding.t option
       * Gap.t option
@@ -89,9 +90,13 @@ let column ?(stretch = false) ?weights ?background ?padding ?gap ?border
       Option.map spacing_size corner_radius,
       children )
 
-let row ?weights ?background ?padding ?gap ?border ?corner_radius children =
+let row ?(horizontal_scroll = false) ?weights ?background ?padding ?gap ?border
+    ?corner_radius children =
+  if horizontal_scroll && Option.is_some weights then
+    invalid_arg "A horizontally scrolling row cannot have weights";
   Row
-    ( weights,
+    ( horizontal_scroll,
+      weights,
       background,
       padding,
       gap,
@@ -124,9 +129,18 @@ let rec map f = function
           border,
           corner_radius,
           List.map (map f) children )
-  | Row (weights, background, padding, gap, border, corner_radius, children) ->
+  | Row
+      ( horizontal_scroll,
+        weights,
+        background,
+        padding,
+        gap,
+        border,
+        corner_radius,
+        children ) ->
       Row
-        ( weights,
+        ( horizontal_scroll,
+          weights,
           background,
           padding,
           gap,
@@ -227,12 +241,22 @@ let rec to_json event = function
         | Some weights ->
             fields @ [ ("weights", `List (List.map (fun x -> `Int x) weights)) ]
         | None -> fields)
-  | Row (weights, background, padding, gap, border, corner_radius, children) ->
+  | Row
+      ( horizontal_scroll,
+        weights,
+        background,
+        padding,
+        gap,
+        border,
+        corner_radius,
+        children ) ->
       let fields =
         [
           ("@type", `String "row");
           ("children", `List (List.map (to_json event) children));
         ]
+        @ (if horizontal_scroll then [ ("horizontalScroll", `Bool true) ]
+           else [])
         @ color_fields "background" background
         @ spacing_fields padding gap
         @ decoration_fields border corner_radius

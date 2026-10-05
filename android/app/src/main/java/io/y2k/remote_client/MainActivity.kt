@@ -98,6 +98,7 @@ sealed interface UiNode {
         val gap: UiGap = UiGap(),
         val border: UiBorder? = null,
         val cornerRadius: Int = 0,
+        val horizontalScroll: Boolean = false,
     ) : UiNode
 
     data class Text(val text: String) : UiNode
@@ -204,7 +205,12 @@ private fun parseUiNode(node: JSONObject): UiNode {
                     }
                 UiNode.Column(parsedChildren, weights, stretch, background, padding, gap, border, cornerRadius)
             } else {
-                UiNode.Row(parsedChildren, weights, background, padding, gap, border, cornerRadius)
+                val horizontalScroll = if (node.has("horizontalScroll")) {
+                    node.get("horizontalScroll") as? Boolean
+                        ?: throw IllegalArgumentException("row horizontalScroll must be a boolean")
+                } else false
+                require(!horizontalScroll || weights == null) { "A horizontally scrolling row cannot have weights" }
+                UiNode.Row(parsedChildren, weights, background, padding, gap, border, cornerRadius, horizontalScroll)
             }
         }
         "text" ->

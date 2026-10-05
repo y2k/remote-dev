@@ -7,6 +7,14 @@
 - Do not introduce dependencies or boilerplate when a direct implementation is sufficient.
 - Mark an intentional shortcut with a `ponytail:` comment that states its limit and when it should be revisited.
 
+# Worktree
+
+- Use the main worktree by default, including its current branch, without asking for confirmation. Create or switch to a separate worktree only when the user explicitly requests it.
+
+# OpenSpec
+
+- Before archiving a change, sync its delta specs into the main specs by default, without asking for confirmation, unless the user explicitly requests otherwise.
+
 # Server-Defined UI
 
 - Implement server-defined UI on the OCaml backend using The Elm Architecture (TEA): `model`, `msg`, a pure `view`, and `update`.

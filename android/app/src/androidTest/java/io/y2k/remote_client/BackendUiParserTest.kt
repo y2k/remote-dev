@@ -69,6 +69,47 @@ class BackendUiParserTest {
     @get:Rule val composeRule = createComposeRule()
 
     @Test
+    fun rejectsInvalidHorizontalScroll() {
+        for (value in listOf("null", "1", "\"true\"", "[]", "{}")) {
+            assertTrue("Accepted horizontalScroll=$value", runCatching {
+                parseUiNode("""{"@type":"row","children":[],"horizontalScroll":$value}""")
+            }.exceptionOrNull() is IllegalArgumentException)
+        }
+        assertTrue(runCatching {
+            parseUiNode("""{"@type":"row","children":[],"weights":[],"horizontalScroll":true}""")
+        }.exceptionOrNull() is IllegalArgumentException)
+        assertEquals(UiNode.Row(emptyList()), parseUiNode("""{"@type":"row","children":[]}"""))
+        assertEquals(UiNode.Row(emptyList()), parseUiNode("""{"@type":"row","children":[],"horizontalScroll":false}"""))
+    }
+
+    @Test
+    fun horizontalOverflowKeepsAddAndContentStationary() {
+        val buttons = (1..12).joinToString(",") { """{"@type":"button","label":"Tab $it","event":["Select",$it]}""" }
+        val node = parseUiNode("""{"@type":"column","children":[
+            {"@type":"row","weights":[1,0],"children":[
+                {"@type":"row","horizontalScroll":true,"children":[$buttons]},
+                {"@type":"button","label":"+","event":["Create"]}]},
+            {"@type":"text","text":"Projects"}]}""")
+        var event: UiEvent? = null
+        composeRule.setContent {
+            MyApplicationTheme {
+                Box(Modifier.width(320.dp).height(240.dp)) {
+                    UiNodeContent(node, { event = it }, { _, _ -> }, false)
+                }
+            }
+        }
+        val addBounds = composeRule.onNodeWithText("+").fetchSemanticsNode().boundsInRoot
+        val projectsBounds = composeRule.onNodeWithText("Projects").fetchSemanticsNode().boundsInRoot
+        composeRule.onNode(hasScrollAction()).performScrollToNode(hasText("Tab 12"))
+        composeRule.onNodeWithText("Tab 12").assertIsDisplayed().performClick()
+        assertEquals(UiEvent("""["Select",12]"""), event)
+        composeRule.onNodeWithText("+").assertIsDisplayed().performClick()
+        assertEquals(UiEvent("""["Create"]"""), event)
+        assertEquals(addBounds, composeRule.onNodeWithText("+").fetchSemanticsNode().boundsInRoot)
+        assertEquals(projectsBounds, composeRule.onNodeWithText("Projects").fetchSemanticsNode().boundsInRoot)
+    }
+
+    @Test
     fun parsesContainerDecorationStrictly() {
         for (type in listOf("row", "column")) {
             fun parse(fields: String) = parseUiNode("""{"@type":"$type","children":[]$fields}""")
