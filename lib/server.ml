@@ -260,7 +260,7 @@ let screenshot_headers body =
       ("cache-control", "no-store");
     ]
 
-let respond environment ~net ~sw ~domain_mgr { Gluten.reqd; _ } =
+let respond environment ~net ~clock ~sw ~domain_mgr { Gluten.reqd; _ } =
   let request = Httpun.Reqd.request reqd in
   let reply ?headers (status, body, content_type) =
     let headers =
@@ -340,7 +340,7 @@ let respond environment ~net ~sw ~domain_mgr { Gluten.reqd; _ } =
     Httpun.Body.Reader.schedule_read
       (Httpun.Reqd.request_body reqd)
       ~on_eof:(fun () ->
-        Runtime.with_opencode_http ~net @@ fun () ->
+        Runtime.with_opencode_http ~net ~clock @@ fun () ->
         let body = Buffer.contents body in
         let event_request = request.meth = `POST && request.target = "/" in
         match
@@ -354,7 +354,7 @@ let respond environment ~net ~sw ~domain_mgr { Gluten.reqd; _ } =
             with
             | Some { session; command; arguments } ->
                 Eio.Fiber.fork ~sw (fun () ->
-                    Runtime.with_opencode_http ~net (fun () ->
+                    Runtime.with_opencode_http ~net ~clock (fun () ->
                         complete_opencode_command environment
                           { session; command; arguments }));
                 reply
@@ -414,8 +414,8 @@ let respond environment ~net ~sw ~domain_mgr { Gluten.reqd; _ } =
   in
   read ()
 
-let run environment ~net ~domain_mgr =
-  Runtime.with_opencode_http ~net (fun () -> initialize environment);
+let run environment ~net ~clock ~domain_mgr =
+  Runtime.with_opencode_http ~net ~clock (fun () -> initialize environment);
   Eio.Switch.run @@ fun sw ->
   let socket =
     Eio.Net.listen ~sw ~reuse_addr:true ~backlog:128 net
@@ -424,7 +424,7 @@ let run environment ~net ~domain_mgr =
   let handler =
     Httpun_eio.Server.create_connection_handler ~sw
       ~request_handler:(fun _ reqd ->
-        respond environment ~net ~sw ~domain_mgr reqd)
+        respond environment ~net ~clock ~sw ~domain_mgr reqd)
       ~error_handler:(fun _ ?request:_ _ start_response ->
         Httpun.Body.Writer.close (start_response Httpun.Headers.empty))
   in

@@ -38,6 +38,15 @@ type http_request = {
 
 type http_response = { status : int; body : string }
 
+type opencode_endpoint = {
+  host : string;
+  address : Eio.Net.Ipaddr.v4v6;
+  port : int;
+  pid : int;
+  version : string option;
+  password : string option;
+}
+
 exception Protocol_error of string
 exception OpenCode_not_found
 
@@ -79,6 +88,7 @@ type _ Effect.t +=
   | Process_lines : (process * (string -> unit)) -> Unix.process_status Effect.t
   | Process_bytes : process -> (string * Unix.process_status) Effect.t
   | Http_request : http_request -> http_response Effect.t
+  | OpenCode_connect : unit Effect.t
 
 let open_process = function
   | Shell command -> Unix.open_process_in command
@@ -128,10 +138,10 @@ let http_error = function
   | `Invalid_response_body_length _ -> "invalid response body length"
   | `Exn exn -> Printexc.to_string exn
 
-let request_http ~net (request : http_request) =
+let request_http ~net endpoint (request : http_request) =
   Eio.Switch.run @@ fun sw ->
   let socket =
-    Eio.Net.connect ~sw net (`Tcp (Eio.Net.Ipaddr.V4.loopback, 4096))
+    Eio.Net.connect ~sw net (`Tcp (endpoint.address, endpoint.port))
   in
   let client = Httpun_eio.Client.create_connection ~sw socket in
   let finished, resolve = Eio.Promise.create () in
@@ -156,7 +166,7 @@ let request_http ~net (request : http_request) =
   in
   let headers =
     Httpun.Headers.of_list
-      (("host", "127.0.0.1:4096")
+      (("host", endpoint.host)
       :: ("content-length", string_of_int (String.length request.body))
       :: request.headers)
   in
@@ -173,14 +183,17 @@ let request_http ~net (request : http_request) =
   | Ok response -> response
   | Error message -> failwith message
 
-let with_http (handle : http_request -> http_response) f =
-  try f ()
-  with effect Http_request request, k -> (
-    match handle request with
-    | response -> Effect.Deep.continue k response
-    | exception exn -> Effect.Deep.discontinue k exn)
-
-let with_opencode_http ~net = with_http (request_http ~net)
+let with_http ?(connect = fun () -> ()) (handle : http_request -> http_response)
+    f =
+  try f () with
+  | effect OpenCode_connect, k -> (
+      match connect () with
+      | () -> Effect.Deep.continue k ()
+      | exception exn -> Effect.Deep.discontinue k exn)
+  | effect Http_request request, k -> (
+      match handle request with
+      | response -> Effect.Deep.continue k response
+      | exception exn -> Effect.Deep.discontinue k exn)
 
 let lines process =
   let output = ref [] in
@@ -423,6 +436,140 @@ let optional_string name fields =
   | Some (`String value) -> Some value
   | Some _ -> raise (Protocol_error ("invalid OpenCode " ^ name))
 
+let opencode_registration_path ?(getenv = Sys.getenv_opt) () =
+  let state =
+    match getenv "XDG_STATE_HOME" with
+    | Some path -> path
+    | None -> (
+        match getenv "HOME" with
+        | Some home -> Filename.concat home ".local/state"
+        | None -> failwith "OpenCode service registration directory unavailable"
+        )
+  in
+  Filename.concat state "opencode/service.json"
+
+let read_opencode_registration () =
+  In_channel.with_open_bin (opencode_registration_path ()) In_channel.input_all
+
+let opencode_endpoint body =
+  let invalid () =
+    raise (Protocol_error "invalid OpenCode service registration")
+  in
+  try
+    let fields =
+      match json body with `Assoc fields -> fields | _ -> invalid ()
+    in
+    let url = required_string "url" fields in
+    if not (String.starts_with ~prefix:"http://" url) then invalid ();
+    let host = String.sub url 7 (String.length url - 7) in
+    let host =
+      if String.ends_with ~suffix:"/" host then
+        String.sub host 0 (String.length host - 1)
+      else host
+    in
+    let colon = String.rindex host ':' in
+    let hostname = String.sub host 0 colon in
+    let port_text =
+      String.sub host (colon + 1) (String.length host - colon - 1)
+    in
+    if
+      port_text = ""
+      || not
+           (String.for_all
+              (function '0' .. '9' -> true | _ -> false)
+              port_text)
+    then invalid ();
+    let port = int_of_string port_text in
+    if port < 1 || port > 65535 then invalid ();
+    let address =
+      match hostname with
+      | "localhost" | "127.0.0.1" -> Eio.Net.Ipaddr.V4.loopback
+      | "[::1]" -> Eio.Net.Ipaddr.V6.loopback
+      | _ -> invalid ()
+    in
+    let pid =
+      match field "pid" fields with
+      | Some (`Int pid) when pid > 0 -> pid
+      | _ -> invalid ()
+    in
+    {
+      host;
+      address;
+      port;
+      pid;
+      version = optional_string "version" fields;
+      password = optional_string "password" fields;
+    }
+  with Protocol_error _ | Failure _ | Invalid_argument _ | Not_found ->
+    invalid ()
+
+let opencode_auth endpoint =
+  match endpoint.password with
+  | None -> []
+  | Some password ->
+      [
+        ("authorization", "Basic " ^ Base64.encode_exn ("opencode:" ^ password));
+      ]
+
+let discover_opencode ~clock ?(read = read_opencode_registration) ~request () =
+  let endpoint =
+    let body =
+      try read ()
+      with Sys_error _ -> failwith "OpenCode service registration unavailable"
+    in
+    opencode_endpoint body
+  in
+  let response =
+    try
+      Eio.Time.with_timeout_exn clock 5. (fun () ->
+          request endpoint
+            {
+              meth = `GET;
+              target = "/api/info";
+              headers = opencode_auth endpoint;
+              body = "";
+            })
+    with Eio.Time.Timeout ->
+      failwith "OpenCode service health check timed out"
+  in
+  if response.status <> 200 then
+    failwith (Printf.sprintf "OpenCode server returned HTTP %d" response.status);
+  let fields =
+    match json response.body with
+    | `Assoc fields -> fields
+    | _ -> raise (Protocol_error "invalid OpenCode health response")
+  in
+  let version = required_string "version" fields in
+  if
+    field "pid" fields <> Some (`Int endpoint.pid)
+    || (not (String.starts_with ~prefix:"2." version))
+    ||
+    match endpoint.version with
+    | Some registered -> registered <> version
+    | None -> false
+  then
+    failwith "OpenCode service registration does not match a healthy V2 service";
+  endpoint
+
+let with_opencode_service ~clock ?(read = read_opencode_registration) ~request f
+    =
+  let endpoint = ref None in
+  with_http
+    ~connect:(fun () ->
+      endpoint := Some (discover_opencode ~clock ~read ~request ()))
+    (fun req ->
+      let endpoint =
+        match !endpoint with
+        | Some endpoint -> endpoint
+        | None -> failwith "OpenCode operation has no connection"
+      in
+      request endpoint
+        { req with headers = opencode_auth endpoint @ req.headers })
+    f
+
+let with_opencode_http ~net ~clock f =
+  with_opencode_service ~clock ~request:(request_http ~net) f
+
 let required_timestamp name fields =
   match field name fields with
   | Some (`Int value) -> string_of_int value
@@ -446,9 +593,12 @@ let opencode_session = function
       in
       ( {
           id = required_string "id" fields;
-          title = required_string "title" fields;
-          directory = required_string "directory" fields;
-          workspace = optional_string "workspaceID" fields;
+          title =
+            Option.value ~default:"Без названия"
+              (optional_string "title" fields);
+          directory =
+            required_assoc "location" fields |> required_string "directory";
+          workspace = None;
           agent = optional_string "agent" fields;
           model;
           status = Idle;
@@ -458,7 +608,7 @@ let opencode_session = function
 
 let opencode_session_page body =
   match json body with
-  | `List sessions -> List.map opencode_session sessions
+  | `Assoc fields -> required_list "data" fields |> List.map opencode_session
   | _ -> raise (Protocol_error "invalid OpenCode session list")
 
 let opencode_sessions body = opencode_session_page body |> List.map fst
@@ -475,12 +625,18 @@ let opencode_status = function
 let opencode_statuses body =
   match json body with
   | `Assoc fields ->
-      List.map (fun (id, value) -> (id, opencode_status value)) fields
+      required_assoc "data" fields
+      |> List.map (fun (id, value) ->
+          match value with
+          | `Assoc status when field "type" status = Some (`String "running") ->
+              (id, Busy)
+          | _ -> raise (Protocol_error "invalid OpenCode active execution"))
   | _ -> raise (Protocol_error "invalid OpenCode status list")
 
 let opencode_pending body =
   match json body with
-  | `List requests ->
+  | `Assoc fields ->
+      let requests = required_list "data" fields in
       List.map
         (function
           | `Assoc fields -> required_string "sessionID" fields
@@ -488,55 +644,54 @@ let opencode_pending body =
         requests
   | _ -> raise (Protocol_error "invalid OpenCode pending input list")
 
-let opencode_role fields =
-  match required_string "role" fields with
-  | "user" -> User
-  | "assistant" -> Assistant
-  | _ -> raise (Protocol_error "invalid OpenCode message role")
-
-let opencode_messages body =
+let opencode_message_page body =
   match json body with
-  | `List messages ->
-      List.concat_map
-        (function
-          | `Assoc fields ->
-              let role = opencode_role (required_assoc "info" fields) in
-              required_list "parts" fields
-              |> List.filter_map (function
-                | `Assoc part when field "type" part = Some (`String "text") ->
-                    Some { role; text = required_string "text" part }
-                | _ -> None)
-          | _ -> raise (Protocol_error "invalid OpenCode message"))
-        messages
+  | `Assoc fields ->
+      ( required_list "data" fields,
+        required_assoc "cursor" fields |> optional_string "next" )
   | _ -> raise (Protocol_error "invalid OpenCode message list")
 
-let opencode_context session model =
-  Option.to_list
-    (Option.map (fun agent -> ("agent", `String agent)) session.agent)
-  @
-  match session.model with
-  | None -> []
-  | Some (provider, id, variant) ->
-      ("model", model provider id)
-      :: Option.to_list
-           (Option.map (fun value -> ("variant", `String value)) variant)
+let opencode_text messages =
+  List.concat_map
+    (function
+      | `Assoc fields -> (
+          match required_string "type" fields with
+          | "user" -> [ { role = User; text = required_string "text" fields } ]
+          | "assistant" ->
+              required_list "content" fields
+              |> List.filter_map (function
+                | `Assoc part when field "type" part = Some (`String "text") ->
+                    Some
+                      { role = Assistant; text = required_string "text" part }
+                | _ -> None)
+          | _ -> [])
+      | _ -> raise (Protocol_error "invalid OpenCode message"))
+    messages
 
-let opencode_prompt_body session prompt =
-  `Assoc
-    (opencode_context session (fun provider model ->
-         `Assoc [ ("providerID", `String provider); ("modelID", `String model) ])
-    @ [
-        ( "parts",
-          `List
-            [ `Assoc [ ("type", `String "text"); ("text", `String prompt) ] ] );
-      ])
-  |> Yojson.Basic.to_string
+let opencode_messages body = opencode_message_page body |> fst |> opencode_text
 
-let opencode_command_body session command arguments =
-  `Assoc
-    (opencode_context session (fun provider model ->
-         `String (provider ^ "/" ^ model))
-    @ [ ("command", `String command); ("arguments", `String arguments) ])
+let opencode_retry messages =
+  List.fold_left
+    (fun latest -> function
+      | `Assoc fields when field "type" fields = Some (`String "assistant") -> (
+          match field "retry" fields with
+          | None | Some `Null -> None
+          | Some (`Assoc retry) ->
+              Some (required_assoc "error" retry |> required_string "message")
+          | _ -> raise (Protocol_error "invalid OpenCode retry"))
+      | _ -> latest)
+    None messages
+
+let status_with_retry status messages =
+  match (status, opencode_retry messages) with
+  | Busy, Some message -> Retry message
+  | _ -> status
+
+let opencode_prompt_body (_session : opencode_session) prompt =
+  `Assoc [ ("text", `String prompt) ] |> Yojson.Basic.to_string
+
+let opencode_command_body (_session : opencode_session) command arguments =
+  `Assoc [ ("name", `String command); ("text", `String arguments) ]
   |> Yojson.Basic.to_string
 
 let is_uri_component = function
@@ -557,124 +712,163 @@ let uri_component value =
     value;
   Buffer.contents output
 
-let perform_http ?directory ?workspace meth target body =
-  let target, headers =
-    match (meth, directory) with
-    | `GET, Some directory ->
-        let query =
-          "directory=" ^ uri_component directory
-          ^
-          match workspace with
-          | Some workspace -> "&workspace=" ^ uri_component workspace
-          | None -> ""
-        in
-        ( (target
-          ^ if String.contains target '?' then "&" ^ query else "?" ^ query),
-          [] )
-    | `POST, Some directory ->
-        ( (match workspace with
-          | Some workspace -> target ^ "?workspace=" ^ uri_component workspace
-          | None -> target),
-          [ ("x-opencode-directory", uri_component directory) ] )
-    | (`GET | `POST), None -> (target, [])
-    | _ -> assert false
-  in
+let perform_http meth target body =
   let headers =
-    if meth = `POST && body <> "" then
-      ("content-type", "application/json") :: headers
-    else headers
-  in
-  let headers =
-    match Sys.getenv_opt "OPENCODE_SERVER_PASSWORD" with
-    | None | Some "" -> headers
-    | Some password ->
-        ("authorization", "Basic " ^ Base64.encode_exn ("opencode:" ^ password))
-        :: headers
+    if meth = `POST && body <> "" then [ ("content-type", "application/json") ]
+    else []
   in
   Effect.perform (Http_request { meth; target; headers; body })
 
 let expect_status expected { status; body } =
   if status = expected then body
-  else if status = 404 then raise OpenCode_not_found
   else
-    failwith
-      (Printf.sprintf "OpenCode server returned HTTP %d%s" status
-         (if status = 401 || body = "" then "" else ": " ^ body))
+    let tag =
+      if status = 401 then None
+      else
+        try
+          match json body with
+          | `Assoc fields -> optional_string "_tag" fields
+          | _ -> None
+        with Protocol_error _ -> None
+    in
+    if status = 404 && tag = Some "SessionNotFoundError" then
+      raise OpenCode_not_found;
+    let detail =
+      match tag with
+      | Some
+          (( "CommandNotFoundError" | "LocationNotFoundError"
+           | "CommandExecutionError" | "ConflictError" | "InvalidRequestError"
+             ) as tag) ->
+          " (" ^ tag ^ ")"
+      | _ -> ""
+    in
+    failwith (Printf.sprintf "OpenCode server returned HTTP %d%s" status detail)
 
-let get ?directory ?workspace target =
-  perform_http ?directory ?workspace `GET target "" |> expect_status 200
+let get target = perform_http `GET target "" |> expect_status 200
 
-let post ?directory ?workspace ?(body = "") expected target =
-  perform_http ?directory ?workspace `POST target body |> expect_status expected
+let post ?(body = "") expected target =
+  perform_http `POST target body |> expect_status expected
 
 let session_status statuses id =
   Option.value ~default:Idle (List.assoc_opt id statuses)
 
-let load_opencode_sessions () =
-  let sessions = get "/experimental/session?limit=20" |> opencode_sessions in
+let load_opencode_session_list ?directory () =
+  Effect.perform OpenCode_connect;
+  let target =
+    "/api/session?limit=20&order=desc"
+    ^
+    match directory with
+    | Some directory -> "&directory=" ^ uri_component directory
+    | None -> ""
+  in
+  let sessions = get target |> opencode_sessions in
   let statuses =
-    sessions
-    |> List.map (fun session -> (session.directory, session.workspace))
-    |> List.sort_uniq compare
-    |> List.concat_map (fun (directory, workspace) ->
-        get ~directory ?workspace "/session/status" |> opencode_statuses)
+    if sessions = [] then [] else get "/api/session/active" |> opencode_statuses
   in
   List.map
     (fun (session : opencode_session) ->
-      { session with status = session_status statuses session.id })
+      let status = session_status statuses session.id in
+      let status =
+        if status = Busy then
+          get
+            ("/api/session/" ^ uri_component session.id
+           ^ "/message?type=assistant&order=desc&limit=1")
+          |> opencode_message_page |> fst |> status_with_retry status
+        else status
+      in
+      { session with status })
     sessions
 
+let load_opencode_sessions () = load_opencode_session_list ()
+
+let load_opencode_folder_sessions directory =
+  load_opencode_session_list ~directory ()
+
+let create_opencode_session directory =
+  Effect.perform OpenCode_connect;
+  let body =
+    `Assoc [ ("location", `Assoc [ ("directory", `String directory) ]) ]
+    |> Yojson.Basic.to_string
+  in
+  match post ~body 200 "/api/session" |> json with
+  | `Assoc fields ->
+      required_assoc "data" fields |> fun data ->
+      fst (opencode_session (`Assoc data))
+  | _ -> raise (Protocol_error "invalid OpenCode create response")
+
 let load_opencode_detail (session : opencode_session) =
-  let directory = session.directory in
+  Effect.perform OpenCode_connect;
   let id = uri_component session.id in
-  let messages =
-    get ~directory ?workspace:session.workspace ("/session/" ^ id ^ "/message")
-    |> opencode_messages
+  let target = "/api/session/" ^ id in
+  let session =
+    match get target |> json with
+    | `Assoc fields ->
+        required_assoc "data" fields |> fun fields ->
+        fst (opencode_session (`Assoc fields))
+    | _ -> raise (Protocol_error "invalid OpenCode session response")
   in
-  let statuses =
-    get ~directory ?workspace:session.workspace "/session/status"
-    |> opencode_statuses
+  let rec load_messages query acc =
+    let messages, next =
+      get (target ^ "/message?" ^ query) |> opencode_message_page
+    in
+    let acc = List.rev_append messages acc in
+    match (messages, next) with
+    | [], _ | _, None -> List.rev acc
+    | _, Some cursor -> load_messages ("cursor=" ^ uri_component cursor) acc
   in
-  let permissions =
-    get ~directory ?workspace:session.workspace "/permission"
-    |> opencode_pending
-  in
-  let questions =
-    get ~directory ?workspace:session.workspace "/question" |> opencode_pending
-  in
+  let messages = load_messages "order=asc" [] in
+  let statuses = get "/api/session/active" |> opencode_statuses in
+  let permissions = get (target ^ "/permission") |> opencode_pending in
+  let questions = get (target ^ "/form") |> opencode_pending in
   {
-    session = { session with status = session_status statuses session.id };
-    messages;
+    session =
+      {
+        session with
+        status = status_with_retry (session_status statuses session.id) messages;
+      };
+    messages = opencode_text messages;
     needs_input =
       List.mem session.id permissions || List.mem session.id questions;
   }
 
 let submit_opencode_prompt session prompt =
-  ignore
-    (post ~directory:session.directory ?workspace:session.workspace
-       ~body:(opencode_prompt_body session prompt)
-       204
-       ("/session/" ^ uri_component session.id ^ "/prompt_async"))
-
-let validate_command_response body =
-  match json body with
-  | `Assoc fields ->
-      ignore (required_assoc "info" fields);
-      ignore (required_list "parts" fields)
-  | _ -> raise (Protocol_error "invalid OpenCode command response")
-
-let submit_opencode_command session command arguments =
-  post ~directory:session.directory ?workspace:session.workspace
-    ~body:(opencode_command_body session command arguments)
-    200
-    ("/session/" ^ uri_component session.id ^ "/command")
-  |> validate_command_response
-
-let abort_opencode session =
+  Effect.perform OpenCode_connect;
   match
-    post ~directory:session.directory ?workspace:session.workspace 200
-      ("/session/" ^ uri_component session.id ^ "/abort")
+    post
+      ~body:(opencode_prompt_body session prompt)
+      200
+      ("/api/session/" ^ uri_component session.id ^ "/prompt")
     |> json
   with
-  | `Bool true -> ()
+  | `Assoc fields ->
+      let data = required_assoc "data" fields in
+      let id = required_string "id" data in
+      if
+        (not (String.starts_with ~prefix:"msg_" id))
+        || required_string "sessionID" data <> session.id
+        || required_string "type" data <> "user"
+        || not (List.mem (required_string "delivery" data) [ "steer"; "queue" ])
+      then raise (Protocol_error "invalid OpenCode prompt admission");
+      ignore (required_assoc "time" data |> required_timestamp "created");
+      ignore (required_assoc "payload" data |> required_string "text")
+  | _ -> raise (Protocol_error "invalid OpenCode prompt admission")
+
+let submit_opencode_command session command arguments =
+  Effect.perform OpenCode_connect;
+  ignore
+    (post
+       ~body:(opencode_command_body session command arguments)
+       204
+       ("/api/session/" ^ uri_component session.id ^ "/command"))
+
+let abort_opencode session =
+  Effect.perform OpenCode_connect;
+  match
+    post 200 ("/api/session/" ^ uri_component session.id ^ "/interrupt") |> json
+  with
+  | `Assoc fields
+    when match field "interrupted" fields with
+         | Some (`Bool _) -> true
+         | _ -> false ->
+      ()
   | _ -> raise (Protocol_error "invalid OpenCode abort response")

@@ -21,14 +21,9 @@ let with_process f =
 let with_http
     (handle :
       Remote_dev.Runtime.http_request -> Remote_dev.Runtime.http_response) f =
-  try f ()
-  with effect Remote_dev.Runtime.Http_request request, k ->
-    Effect.Deep.continue k (handle request)
+  Remote_dev.Runtime.with_http handle f
 
-let with_http_failure f =
-  try f ()
-  with effect Remote_dev.Runtime.Http_request _, k ->
-    Effect.Deep.discontinue k (Failure "offline")
+let with_http_failure f = with_http (fun _ -> failwith "offline") f
 
 let with_created_worktree f =
   try f ()
@@ -1437,9 +1432,13 @@ let () =
     with_http
       (fun (request : Remote_dev.Runtime.http_request) ->
         assert (request.meth = `POST);
-        assert (String.ends_with ~suffix:"/prompt_async" request.target);
+        assert (request.target = "/api/session/busy/prompt");
         assert (String.contains request.body '$');
-        { status = 204; body = "" })
+        {
+          status = 200;
+          body =
+            {|{"data":{"id":"msg_1","sessionID":"busy","type":"user","delivery":"steer","time":{"created":1},"payload":{"text":"literal"}}}|};
+        })
       (fun () ->
         Remote_dev.Server.response opencode_environment ~body:prompt_body `POST
           "/")
@@ -1463,13 +1462,21 @@ let () =
   let status, body, content_type =
     with_http
       (fun (request : Remote_dev.Runtime.http_request) ->
-        if request.meth = `POST then { status = 200; body = "true" }
+        if request.meth = `POST then (
+          assert (request.target = "/api/session/busy/interrupt");
+          { status = 200; body = {|{"interrupted":true}|} })
         else if
-          String.starts_with ~prefix:"/session/busy/message" request.target
-        then { status = 200; body = "[]" }
-        else if String.starts_with ~prefix:"/session/status" request.target then
-          { status = 200; body = "{}" }
-        else { status = 200; body = "[]" })
+          String.starts_with ~prefix:"/api/session/busy/message" request.target
+        then { status = 200; body = {|{"data":[],"cursor":{}}|} }
+        else if request.target = "/api/session/busy" then
+          {
+            status = 200;
+            body =
+              {|{"data":{"id":"busy","title":"Busy session","location":{"directory":"/tmp/busy"},"time":{"updated":1}}}|};
+          }
+        else if request.target = "/api/session/active" then
+          { status = 200; body = {|{"data":{"busy":{"type":"running"}}}|} }
+        else { status = 200; body = {|{"data":[]}|} })
       (fun () ->
         Remote_dev.Server.response opencode_environment
           ~body:
@@ -1482,7 +1489,7 @@ let () =
   assert (List.length (stream_documents body) = 2);
   assert (
     match (Atomic.get Remote_dev.Server.state).screen with
-    | Remote_dev.Home.Session (_, { session = { status = Idle; _ }; _ }) -> true
+    | Remote_dev.Home.Session (_, { session = { status = Busy; _ }; _ }) -> true
     | _ -> false);
   Atomic.set Remote_dev.Server.state selected_home;
   let command_request =
@@ -1509,8 +1516,11 @@ let () =
   with_http
     (fun (request : Remote_dev.Runtime.http_request) ->
       assert (String.ends_with ~suffix:"/command" request.target);
-      assert (not (String.ends_with ~suffix:"/prompt_async" request.target));
-      { status = 400; body = "unknown command" })
+      assert (request.target = "/api/session/busy/command");
+      {
+        status = 404;
+        body = {|{"_tag":"CommandNotFoundError","message":"unknown command"}|};
+      })
     (fun () ->
       Remote_dev.Server.complete_opencode_command opencode_environment
         command_request);
@@ -1522,21 +1532,24 @@ let () =
   let status, body, _ =
     with_http
       (fun (request : Remote_dev.Runtime.http_request) ->
-        if String.starts_with ~prefix:"/session/busy/message" request.target
+        if String.starts_with ~prefix:"/api/session/busy/message" request.target
         then
           {
             status = 200;
             body =
-              "[{\"info\":{\"role\":\"assistant\"},\"parts\":[{\"type\":\"text\",\"text\":\"refreshed\"}]}]";
+              {|{"data":[{"type":"assistant","content":[{"type":"text","text":"refreshed"}],"retry":{"error":{"message":"later"}}}],"cursor":{}}|};
           }
-        else if String.starts_with ~prefix:"/session/status" request.target then
+        else if request.target = "/api/session/busy" then
           {
             status = 200;
-            body = "{\"busy\":{\"type\":\"retry\",\"message\":\"later\"}}";
+            body =
+              {|{"data":{"id":"busy","title":"Busy session","location":{"directory":"/tmp/busy"},"time":{"updated":1}}}|};
           }
-        else if String.starts_with ~prefix:"/permission" request.target then
-          { status = 200; body = "[{\"sessionID\":\"busy\"}]" }
-        else { status = 200; body = "[]" })
+        else if request.target = "/api/session/active" then
+          { status = 200; body = {|{"data":{"busy":{"type":"running"}}}|} }
+        else if request.target = "/api/session/busy/permission" then
+          { status = 200; body = {|{"data":[{"sessionID":"busy"}]}|} }
+        else { status = 200; body = {|{"data":[]}|} })
       (fun () ->
         Remote_dev.Server.response opencode_environment
           ~body:(request_body Remote_dev.Home.Refresh)
@@ -1551,8 +1564,8 @@ let () =
   assert (
     refreshed
     |> has_text
-         "Error: Failure(\"OpenCode server returned HTTP 400: unknown \
-          command\")");
+         "Error: Failure(\"OpenCode server returned HTTP 404 \
+          (CommandNotFoundError)\")");
   Atomic.set Remote_dev.Server.state selected_home;
   ignore (Remote_dev.Server.dispatch opencode_environment Remote_dev.Home.Back);
   with_http
@@ -1564,6 +1577,51 @@ let () =
   assert (
     match (Atomic.get Remote_dev.Server.state).screen with
     | Remote_dev.Home.Sessions { error = None; _ } -> true
+    | _ -> false);
+  Atomic.set Remote_dev.Server.state selected_home;
+  with_http
+    (fun request ->
+      assert (request.Remote_dev.Runtime.target = "/api/session/busy");
+      { status = 404; body = {|{"_tag":"SessionNotFoundError"}|} })
+    (fun () ->
+      ignore
+        (Remote_dev.Server.response opencode_environment
+           ~body:(request_body Remote_dev.Home.Refresh)
+           `POST "/"));
+  assert (
+    match (Atomic.get Remote_dev.Server.state).screen with
+    | Remote_dev.Home.Sessions { error = Some _; _ } -> true
+    | _ -> false);
+  Atomic.set Remote_dev.Server.state selected_home;
+  Eio_main.run (fun env ->
+      Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 2. (fun () ->
+          Eio.Switch.run @@ fun sw ->
+          let started, signal_started = Eio.Promise.create () in
+          let release, signal_release = Eio.Promise.create () in
+          let finished, signal_finished = Eio.Promise.create () in
+          Eio.Fiber.fork ~sw (fun () ->
+              with_http
+                (fun request ->
+                  assert (
+                    request.Remote_dev.Runtime.target
+                    = "/api/session/busy/command");
+                  Eio.Promise.resolve signal_started ();
+                  Eio.Promise.await release;
+                  { status = 204; body = "" })
+                (fun () ->
+                  Remote_dev.Server.complete_opencode_command
+                    opencode_environment command_request);
+              Eio.Promise.resolve signal_finished ());
+          Eio.Promise.await started;
+          let status, _, content_type =
+            Remote_dev.Server.response opencode_environment ~body:"" `GET "/"
+          in
+          assert (status = `OK && content_type = "application/json");
+          Eio.Promise.resolve signal_release ();
+          Eio.Promise.await finished));
+  assert (
+    match (Atomic.get Remote_dev.Server.state).screen with
+    | Remote_dev.Home.Session (_, { background_error = None; _ }) -> true
     | _ -> false);
   let string_to_yojson value = `String value in
   let string_of_yojson = function

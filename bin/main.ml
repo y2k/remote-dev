@@ -11,4 +11,5 @@ let () =
   Remote_dev.Runtime.with_unix_process (fun () ->
       Eio_main.run (fun env ->
           Remote_dev.Server.run environment ~net:(Eio.Stdenv.net env)
+            ~clock:(Eio.Stdenv.clock env)
             ~domain_mgr:(Eio.Stdenv.domain_mgr env)))

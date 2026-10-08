@@ -4,7 +4,7 @@
 
 ## Security
 
-This is a single-user, trusted-LAN development tool, not a public service. The backend listens on port `8080` without authentication. A client on the network can submit prompts using the server user's local configuration and permissions. The OpenCode API remains localhost-only on port `4096`; remote_dev exposes session titles, directories, textual transcripts, and controls for every project known to that OpenCode server.
+This is a single-user, trusted-LAN development tool, not a public service. The backend listens on port `8080` without authentication. A client on the network can submit prompts using the server user's local configuration and permissions. The OpenCode API remains localhost-only on its discovered service port; remote_dev exposes session titles, directories, textual transcripts, and controls for every project known to that OpenCode server.
 
 Run it only on a network you trust. Do not expose port `8080` to the internet.
 
@@ -19,7 +19,7 @@ OCaml / Eio server on :8080
     |-- OpenCode startup: empty tabs; first tab loads the supplied directory root
     |-- Claude startup: immediate subdirectories of the supplied root
     |-- Claude: git worktrees and claude --print stream-json
-    |-- OpenCode: HTTP API on 127.0.0.1:4096
+    |-- OpenCode: V2 HTTP API via local shared-service registration
     `-- adb devices and screencap for selected Android emulators
 ```
 
@@ -29,7 +29,7 @@ The server returns a backend-defined UI document. The Android client renders tha
 
 - A POSIX environment with Dune 3.24 or newer. Dune obtains the OCaml compiler and project dependencies from `dune.lock` on the first build.
 - Git and an authenticated `claude` CLI on `PATH` for the existing Claude worktree screens; neither is needed for the startup directory list.
-- OpenCode 1.18.20 or newer, installed and authenticated, for the existing OpenCode session screens; no OpenCode server is needed for the startup directory list.
+- OpenCode V2, installed and authenticated (contract verified against 2.0.24), for the existing OpenCode session screens; no OpenCode server is needed for the startup directory list. V1 is not supported.
 - Android Platform Tools (`adb`) on `PATH` when using emulator screenshots.
 - Android Studio or an Android SDK setup that can build the `android/` Gradle project.
 - An Android device on the same trusted LAN as the backend.
@@ -76,22 +76,20 @@ Tap a directory to log its absolute path to the backend console; this does not s
 The following commands support the existing OpenCode session screens, which currently have no navigation entry from the directory screen:
 
 ```sh
-opencode serve --hostname 127.0.0.1 --port 4096
-opencode attach http://127.0.0.1:4096
+opencode service start
+opencode service status
+opencode
 ```
 
-`opencode attach` is required to answer permissions or questions. In OpenCode mode the positional path only selects the startup directory-list root; session directories remain server-defined. When active, its session-list screen lists the 20 most recently updated sessions across all projects known to the server, independently of this path, and does not create sessions. Older sessions remain in OpenCode history.
+Use the OpenCode terminal to answer permissions or questions. In OpenCode mode the positional path only selects the startup directory-list root; session directories remain server-defined. When active, its session-list screen lists the 20 most recently updated sessions across all projects known to the server, independently of this path, and does not create sessions. Older sessions remain in OpenCode history.
 
-If the OpenCode server uses a password, the remote_dev backend must inherit the same `OPENCODE_SERVER_PASSWORD`. Export it in each terminal before starting its process; setting it only for `opencode serve` does not pass it to a separately started backend. For example, after setting the variable in the backend's terminal:
+The runtime also provides `load_opencode_folder_sessions directory` for the dependent folder-navigation change. It requests an exact directory match before the 20-session limit, excluding subdirectories and other worktrees; this does not add navigation or a creation control to the current UI.
 
-```sh
-export OPENCODE_SERVER_PASSWORD
-make run ARGS="--agent opencode"
-```
+The backend discovers the already-running service from `$XDG_STATE_HOME/opencode/service.json`, defaulting to `~/.local/state/opencode/service.json`. Run it as the same user with the same state directory as OpenCode. It verifies `/api/info` against the registered PID and version with a five-second health timeout and accepts only local HTTP endpoints. Each session operation reads registration again, so a service restart does not require a backend restart.
 
-The backend sends Basic authentication on every OpenCode request when the password is non-empty, always using the username `opencode`. An unset or empty password sends no authorization header. Restart the backend after changing its environment. HTTP 401 means the server rejected the request's authentication.
+Every request uses the registration's optional password with Basic username `opencode`. A missing password omits Authorization; an empty password is sent verbatim. Backend `OPENCODE_SERVER_PASSWORD` and username overrides are ignored. Credentials are never included in UI documents or diagnostics. HTTP 401 reports rejected authentication.
 
-The selected agent cannot be changed without restarting remote_dev. The backend does not start or stop `opencode serve`; connection or protocol errors are reported on the relevant session screen. The directory screen makes no agent requests. The backend listens on all IPv4 interfaces at port `8080`.
+The selected agent cannot be changed without restarting remote_dev. The backend never starts or stops the OpenCode service; missing or stale registration, connection, and protocol errors appear on the relevant session screen. Startup and directory-only operations do not contact OpenCode. Failed writes are not automatically retried. The backend listens on all IPv4 interfaces at port `8080`.
 
 ## Build The Android Client
 
@@ -143,11 +141,11 @@ Tab controls advertise `["Project_tabs_msg",["Create"]]`, `["Project_tabs_msg",[
 
 A Claude prompt returns `application/x-ndjson`. Each nonempty line is a compact complete UI document with the current response accumulated so far; the Android client replaces its displayed document for every line until the response closes. If Claude fails after the stream starts, the final document contains the error.
 
-An ordinary OpenCode prompt is sent to `prompt_async`; remote_dev waits only for its `204` acceptance and returns one `application/json` document. A recognized slash command uses the command endpoint in an application-scoped background fiber and also returns immediately. There is no automatic command-to-prompt fallback. New transcript text and status appear after manual refresh. A busy session exposes Stop; retrying remains visible until OpenCode leaves retry state.
+An ordinary OpenCode prompt is sent as `{text}` to `/api/session/{id}/prompt`; remote_dev waits only for its `200` inbox admission and returns one `application/json` document. A slash command sends `{name,text}` to `/api/session/{id}/command` in an application-scoped background fiber, accepting an empty `204` response. Android remains available while the callback runs. There is no automatic command-to-prompt fallback. Session location, agent, and model stay server-owned. New transcript text and status appear after manual refresh. A busy session exposes Stop, which calls `/interrupt` and refreshes; interruption cleanup can still be busy, and `interrupted=false` is an idle no-op. Retry remains visible until OpenCode leaves retry state.
 
-Pending OpenCode permissions and questions are displayed only as `Needs input in OpenCode`. Answer them in an `opencode attach` terminal. The Android client intentionally cannot approve or reject them.
+Pending session permissions and V2 forms are displayed only as `Needs input in OpenCode`. Answer them in the OpenCode terminal. Android cannot approve, reject, or answer them. Activity comes from the service's active execution map; retry state comes from the latest assistant message of an active session. The list reads retry details only for displayed active sessions. Refresh reads the full text transcript across all message pages, excluding reasoning, tools, and system records. Untitled sessions display `Без названия` without being renamed on the server.
 
-In Claude mode, the first prompt on an open worktree screen starts a CLI session. Later prompts on that screen explicitly resume its session ID while replacing the previously rendered response. Returning to the worktree list or restarting the backend forgets the ID; the Claude-owned session remains in its local history. OpenCode session metadata, transcript, and status always come from `opencode serve`.
+In Claude mode, the first prompt on an open worktree screen starts a CLI session. Later prompts on that screen explicitly resume its session ID while replacing the previously rendered response. Returning to the worktree list or restarting the backend forgets the ID; the Claude-owned session remains in its local history. OpenCode session metadata, transcript, and status always come from the discovered shared service.
 
 The emulator panel appears on every screen. Its buttons send a root event such as
 `["Emulator_msg",["Select","emulator-5554"]]`. The selected serial is global and

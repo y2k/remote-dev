@@ -5,12 +5,7 @@ let with_process ~check lines (status : Unix.process_status) f =
     List.iter on_line lines;
     Effect.Deep.continue k status
 
-let with_http handle =
-  Remote_dev.Runtime.with_http (fun request ->
-      (if Array.length Sys.argv = 2 then
-         let expected = if Sys.argv.(1) = "" then None else Some Sys.argv.(1) in
-         assert (List.assoc_opt "authorization" request.headers = expected));
-      handle request)
+let with_http = Remote_dev.Runtime.with_http
 
 let with_emulator_processes f =
   try f () with
@@ -145,34 +140,6 @@ let () =
           ignore (Remote_dev.Runtime.load_directories (path "file"));
           false
         with Unix.Unix_error _ | Sys_error _ -> true));
-  (if Array.length Sys.argv = 1 then
-     let environment =
-       Unix.environment () |> Array.to_list
-       |> List.filter (fun entry ->
-           not
-             (String.starts_with ~prefix:"OPENCODE_SERVER_PASSWORD=" entry
-             || String.starts_with ~prefix:"OPENCODE_SERVER_USERNAME=" entry))
-     in
-     List.iter
-       (fun (credentials, expected) ->
-         let pid =
-           Unix.create_process_env Sys.executable_name
-             [| Sys.executable_name; expected |]
-             (Array.of_list (credentials @ environment))
-             Unix.stdin Unix.stdout Unix.stderr
-         in
-         assert (snd (Unix.waitpid [] pid) = Unix.WEXITED 0))
-       [
-         ([], "");
-         ([ "OPENCODE_SERVER_PASSWORD=" ], "");
-         ([ "OPENCODE_SERVER_PASSWORD=secret" ], "Basic b3BlbmNvZGU6c2VjcmV0");
-         ( [
-             "OPENCODE_SERVER_PASSWORD=secret"; "OPENCODE_SERVER_USERNAME=alice";
-           ],
-           "Basic b3BlbmNvZGU6c2VjcmV0" );
-         ( [ "OPENCODE_SERVER_PASSWORD= p:a\tss\n " ],
-           "Basic b3BlbmNvZGU6IHA6YQlzcwog" );
-       ]);
   let claude =
     Remote_dev.Runtime.parse_args [| "remote_dev"; "--agent"; "claude" |]
   in
@@ -318,9 +285,7 @@ let () =
             Remote_dev.Runtime.stream_claude ~cwd:worktree ~prompt:"conflict"
               ~session_id:None (fun _ -> ()))));
   let session_json =
-    "[{\"id\":\"session-1\",\"title\":\"Review\",\"directory\":\"/tmp/a \
-     b%\",\"workspaceID\":\"workspace \
-     1\",\"agent\":\"plan\",\"model\":{\"providerID\":\"anthropic\",\"id\":\"claude\",\"variant\":\"high\"},\"time\":{\"updated\":123},\"extra\":true}]"
+    {|{"data":[{"id":"session-1","title":"Review","location":{"directory":"/tmp/a b%"},"agent":"plan","model":{"providerID":"anthropic","id":"claude","variant":"high"},"time":{"updated":123},"extra":true}],"cursor":{}}|}
   in
   assert (
     Remote_dev.Runtime.opencode_sessions session_json
@@ -329,7 +294,7 @@ let () =
           Remote_dev.Runtime.id = "session-1";
           title = "Review";
           directory = "/tmp/a b%";
-          workspace = Some "workspace 1";
+          workspace = None;
           agent = Some "plan";
           model = Some ("anthropic", "claude", Some "high");
           status = Idle;
@@ -340,7 +305,7 @@ let () =
         ignore (Remote_dev.Runtime.opencode_sessions "[{\"id\":\"missing\"}]")));
   assert (
     Remote_dev.Runtime.opencode_messages
-      "[{\"info\":{\"role\":\"user\",\"extra\":1},\"parts\":[{\"type\":\"tool\",\"name\":\"ignored\"},{\"type\":\"text\",\"text\":\"hello\",\"extra\":true}]},{\"info\":{\"role\":\"assistant\"},\"parts\":[{\"type\":\"text\",\"text\":\"world\"}]}]"
+      {|{"data":[{"type":"user","text":"hello"},{"type":"assistant","content":[{"type":"text","text":"world"},{"type":"tool"}]}],"cursor":{}}|}
     = [
         { Remote_dev.Runtime.role = User; text = "hello" };
         { role = Assistant; text = "world" };
@@ -367,26 +332,7 @@ let () =
            status = Idle;
          }
          "  -prompt; $(literal) \"quoted\"  ")
-    = `Assoc
-        [
-          ("agent", `String "plan");
-          ( "model",
-            `Assoc
-              [
-                ("providerID", `String "anthropic");
-                ("modelID", `String "claude");
-              ] );
-          ("variant", `String "high");
-          ( "parts",
-            `List
-              [
-                `Assoc
-                  [
-                    ("type", `String "text");
-                    ("text", `String "  -prompt; $(literal) \"quoted\"  ");
-                  ];
-              ] );
-        ]);
+    = `Assoc [ ("text", `String "  -prompt; $(literal) \"quoted\"  ") ]);
   assert (
     Remote_dev.Runtime.opencode_command_body
       {
@@ -400,23 +346,27 @@ let () =
       }
       "review" ""
     |> Yojson.Basic.from_string
-    = `Assoc [ ("command", `String "review"); ("arguments", `String "") ]);
+    = `Assoc [ ("name", `String "review"); ("text", `String "") ]);
   let requests = ref [] in
   let sessions =
     with_http
       (fun (request : Remote_dev.Runtime.http_request) ->
         requests := request :: !requests;
         match request.target with
-        | "/experimental/session?limit=20" ->
+        | "/api/session?limit=20&order=desc" ->
             { status = 200; body = session_json }
-        | "/session/status?directory=%2Ftmp%2Fa%20b%25&workspace=workspace%201"
-          ->
-            { status = 200; body = "{\"session-1\":{\"type\":\"busy\"}}" }
+        | "/api/session/active" ->
+            {
+              status = 200;
+              body = {|{"data":{"session-1":{"type":"running"}}}|};
+            }
+        | "/api/session/session-1/message?type=assistant&order=desc&limit=1" ->
+            { status = 200; body = {|{"data":[],"cursor":{}}|} }
         | _ -> assert false)
       Remote_dev.Runtime.load_opencode_sessions
   in
   assert ((List.hd sessions).status = Busy);
-  assert (List.length !requests = 2);
+  assert (List.length !requests = 3);
   let page =
     `List
       (List.init 20 (fun index ->
@@ -424,7 +374,7 @@ let () =
              [
                ("id", `String ("paged-" ^ string_of_int index));
                ("title", `String "Paged");
-               ("directory", `String "/tmp/paged");
+               ("location", `Assoc [ ("directory", `String "/tmp/paged") ]);
                ("agent", `String "build");
                ( "model",
                  `Assoc
@@ -434,7 +384,8 @@ let () =
                    ] );
                ("time", `Assoc [ ("updated", `Int (200 - index)) ]);
              ]))
-    |> Yojson.Basic.to_string
+    |> fun data ->
+    Yojson.Basic.to_string (`Assoc [ ("data", data); ("cursor", `Assoc []) ])
   in
   let paged_requests = ref [] in
   let paged =
@@ -442,9 +393,8 @@ let () =
       (fun (request : Remote_dev.Runtime.http_request) ->
         paged_requests := request.target :: !paged_requests;
         match request.target with
-        | "/experimental/session?limit=20" -> { status = 200; body = page }
-        | "/session/status?directory=%2Ftmp%2Fpaged" ->
-            { status = 200; body = "{}" }
+        | "/api/session?limit=20&order=desc" -> { status = 200; body = page }
+        | "/api/session/active" -> { status = 200; body = {|{"data":{}}|} }
         | _ -> assert false)
       Remote_dev.Runtime.load_opencode_sessions
   in
@@ -461,18 +411,24 @@ let () =
       (fun (request : Remote_dev.Runtime.http_request) ->
         match request.target with
         | target
-          when String.starts_with ~prefix:"/session/session-1/message" target ->
+          when String.starts_with ~prefix:"/api/session/session-1/message"
+                 target ->
             {
               status = 200;
               body =
-                "[{\"info\":{\"role\":\"assistant\"},\"parts\":[{\"type\":\"text\",\"text\":\"done\"},{\"type\":\"tool\"}]}]";
+                {|{"data":[{"type":"assistant","content":[{"type":"text","text":"done"},{"type":"tool"}]}],"cursor":{}}|};
             }
-        | target when String.starts_with ~prefix:"/session/status" target ->
-            { status = 200; body = "{}" }
-        | target when String.starts_with ~prefix:"/permission" target ->
-            { status = 200; body = "[{\"sessionID\":\"session-1\"}]" }
-        | target when String.starts_with ~prefix:"/question" target ->
-            { status = 200; body = "[]" }
+        | "/api/session/session-1" ->
+            {
+              status = 200;
+              body =
+                {|{"data":{"id":"session-1","title":"Review","location":{"directory":"/tmp/a b%"},"time":{"updated":123}}}|};
+            }
+        | "/api/session/active" -> { status = 200; body = {|{"data":{}}|} }
+        | "/api/session/session-1/permission" ->
+            { status = 200; body = {|{"data":[{"sessionID":"session-1"}]}|} }
+        | "/api/session/session-1/form" ->
+            { status = 200; body = {|{"data":[]}|} }
         | _ -> assert false)
       (fun () -> Remote_dev.Runtime.load_opencode_detail session)
   in
@@ -482,15 +438,17 @@ let () =
   let posts = ref [] in
   let post_response (request : Remote_dev.Runtime.http_request) =
     posts := request :: !posts;
-    if
-      String.starts_with ~prefix:"/session/session-1/prompt_async"
-        request.target
-    then { Remote_dev.Runtime.status = 204; body = "" }
-    else if
-      String.starts_with ~prefix:"/session/session-1/command" request.target
+    if String.starts_with ~prefix:"/api/session/session-1/prompt" request.target
     then
-      { Remote_dev.Runtime.status = 200; body = "{\"info\":{},\"parts\":[]}" }
-    else { Remote_dev.Runtime.status = 200; body = "true" }
+      {
+        Remote_dev.Runtime.status = 200;
+        body =
+          {|{"data":{"id":"msg_1","sessionID":"session-1","type":"user","delivery":"steer","payload":{"text":"literal"},"time":{"created":1}}}|};
+      }
+    else if
+      String.starts_with ~prefix:"/api/session/session-1/command" request.target
+    then { Remote_dev.Runtime.status = 204; body = "" }
+    else { Remote_dev.Runtime.status = 200; body = {|{"interrupted":true}|} }
   in
   with_http post_response (fun () ->
       Remote_dev.Runtime.submit_opencode_prompt session "$(literal); \"quoted\"");
@@ -499,10 +457,8 @@ let () =
   with_http post_response (fun () -> Remote_dev.Runtime.abort_opencode session);
   List.iter
     (fun (request : Remote_dev.Runtime.http_request) ->
-      assert (
-        List.assoc_opt "x-opencode-directory" request.headers
-        = Some "%2Ftmp%2Fa%20b%25");
-      assert (String.ends_with ~suffix:"?workspace=workspace%201" request.target);
+      assert (List.assoc_opt "x-opencode-directory" request.headers = None);
+      assert (not (String.contains request.target '?'));
       assert (
         List.assoc_opt "content-type" request.headers = Some "application/json"
         || request.body = ""))
@@ -513,12 +469,10 @@ let () =
         request.body <> ""
         && Yojson.Basic.from_string request.body |> function
            | `Assoc fields ->
-               List.assoc_opt "agent" fields = Some (`String "plan")
-               && List.assoc_opt "model" fields
-                  = Some (`String "anthropic/claude")
-               && List.assoc_opt "arguments" fields
-                  = Some (`String "main branch")
-               && List.assoc_opt "variant" fields = Some (`String "high")
+               List.assoc_opt "agent" fields = None
+               && List.assoc_opt "model" fields = None
+               && List.assoc_opt "text" fields = Some (`String "main branch")
+               && List.assoc_opt "name" fields = Some (`String "review")
            | _ -> false));
   assert (
     try
