@@ -48,97 +48,6 @@ module Directories = struct
               None) )
 end
 
-module Project_tabs = struct
-  type model = {
-    tabs : int list;
-    active : int option;
-    next_id : int;
-    directories : Directories.model;
-  }
-
-  type msg =
-    | Create
-    | Select of int
-    | Close of int
-    | Refresh
-    | Directories_msg of Directories.msg
-  [@@deriving yojson, variants]
-
-  let init root =
-    ( {
-        tabs = [];
-        active = None;
-        next_id = 1;
-        directories = fst (Directories.init root);
-      },
-      Cmd.none )
-
-  let update_directories model message =
-    let directories, cmd = Directories.update model.directories message in
-    ({ model with directories }, Cmd.map directories_msg cmd)
-
-  let view model =
-    let tabs =
-      List.map
-        (fun id ->
-          let active = model.active = Some id in
-          let label = Printf.sprintf "Tab %d" id in
-          row
-            ~background:(if active then Primary_container else Surface)
-            [
-              button ~event:(Select id) (if active then "* " ^ label else label);
-              button ~event:(Close id) "X";
-            ])
-        model.tabs
-    in
-    let strip =
-      row ~weights:[ 1; 0 ]
-        [ row ~horizontal_scroll:true tabs; button ~event:Create "+" ]
-    in
-    column ~stretch:true
-      (strip
-      ::
-      (match model.active with
-      | None -> []
-      | Some _ ->
-          [
-            Components.map directories_msg (Directories.view model.directories);
-          ]))
-
-  let update model = function
-    | Create ->
-        ( {
-            model with
-            tabs = model.tabs @ [ model.next_id ];
-            active = Some model.next_id;
-            next_id = model.next_id + 1;
-          },
-          if model.tabs = [] then
-            Cmd.map directories_msg (Directories.load model.directories.root)
-          else Cmd.none )
-    | Select id when List.mem id model.tabs ->
-        ({ model with active = Some id }, Cmd.none)
-    | Close id when List.mem id model.tabs ->
-        let rec neighbor previous = function
-          | current :: next :: _ when current = id -> Some next
-          | [ current ] when current = id -> previous
-          | current :: rest -> neighbor (Some current) rest
-          | [] -> None
-        in
-        ( {
-            model with
-            tabs = List.filter (( <> ) id) model.tabs;
-            active =
-              (if model.active = Some id then neighbor None model.tabs
-               else model.active);
-          },
-          Cmd.none )
-    | Refresh when model.tabs <> [] -> update_directories model Directories.Load
-    | Directories_msg message when model.tabs <> [] ->
-        update_directories model message
-    | Select _ | Close _ | Refresh | Directories_msg _ -> (model, Cmd.none)
-end
-
 module New_worktree = struct
   type model = { error : string option }
 
@@ -370,6 +279,9 @@ module Sessions = struct
   type model = {
     sessions : Runtime.opencode_session list;
     error : string option;
+    directory : string option;
+    loading : bool;
+    creating : bool;
   }
 
   open Result_yojson
@@ -378,6 +290,8 @@ module Sessions = struct
     | Load
     | Loaded of (Runtime.opencode_session list, string) result
     | Select of string
+    | Create
+    | Created of (Runtime.opencode_session, string) result
     | Error of string
   [@@deriving yojson]
 
@@ -386,12 +300,15 @@ module Sessions = struct
     | Runtime.Busy -> "busy"
     | Runtime.Retry message -> "retry: " ^ message
 
-  let view { sessions; error } : msg Components.t =
+  let view { sessions; error; directory; loading; creating } : msg Components.t
+      =
     let errors =
       match error with Some error -> [ text ("Error: " ^ error) ] | None -> []
     in
     let sessions =
       match sessions with
+      | [] when loading -> [ text "Loading sessions..." ]
+      | [] when Option.is_some error -> []
       | [] -> [ text "No OpenCode sessions" ]
       | sessions ->
           List.map
@@ -409,27 +326,77 @@ module Sessions = struct
                 ])
             sessions
     in
-    column ~stretch:true ~weights:[ 0; 0; 1 ] ~padding:(Padding.all 12)
+    column ~stretch:true ~weights:[ 0; 0; 0; 1 ] ~padding:(Padding.all 12)
       ~gap:(Gap.make 12)
       [
         column errors;
         text "OpenCode sessions:";
+        column
+          (match directory with
+          | None -> []
+          | Some path ->
+              [
+                text path;
+                (if creating then text "Creating session..."
+                 else button ~event:Create "Создать новую сессию");
+              ]);
         column ~stretch:true ~gap:(Gap.make 12) sessions;
       ]
 
-  let load : msg Cmd.t =
+  let load directory : msg Cmd.t =
     Cmd.Run
       (fun () ->
-        try Some (Loaded (Ok (Runtime.load_opencode_sessions ())))
+        try
+          Some
+            (Loaded
+               (Ok
+                  (match directory with
+                  | None -> Runtime.load_opencode_sessions ()
+                  | Some path -> Runtime.load_opencode_folder_sessions path)))
         with exn -> Some (Loaded (Error (Printexc.to_string exn))))
 
-  let init () = ({ sessions = []; error = None }, load)
+  let init ?directory () =
+    ( {
+        sessions = [];
+        error = None;
+        directory;
+        loading = true;
+        creating = false;
+      },
+      load directory )
 
   let update model = function
-    | Load -> ({ model with error = None }, load)
-    | Loaded (Ok sessions) -> ({ sessions; error = None }, Cmd.none)
-    | Loaded (Error error) -> ({ model with error = Some error }, Cmd.none)
-    | Select _ -> (model, Cmd.none)
+    | Load -> ({ model with error = None; loading = true }, load model.directory)
+    | Loaded (Ok sessions) ->
+        ({ model with sessions; error = None; loading = false }, Cmd.none)
+    | Loaded (Error error) ->
+        ({ model with error = Some error; loading = false }, Cmd.none)
+    | Create when not model.creating -> (
+        match model.directory with
+        | None -> (model, Cmd.none)
+        | Some path ->
+            ( { model with creating = true; error = None },
+              Cmd.Run
+                (fun () ->
+                  try Some (Created (Ok (Runtime.create_opencode_session path)))
+                  with exn -> Some (Created (Error (Printexc.to_string exn))))
+            ))
+    | Created (Error error) ->
+        ({ model with creating = false; error = Some error }, Cmd.none)
+    | Created (Ok session) ->
+        ( {
+            model with
+            creating = false;
+            error = None;
+            sessions =
+              List.take 20
+                (session
+                :: List.filter
+                     (fun (s : Runtime.opencode_session) -> s.id <> session.id)
+                     model.sessions);
+          },
+          Cmd.none )
+    | Select _ | Create -> (model, Cmd.none)
     | Error error -> ({ model with error = Some error }, Cmd.none)
 end
 
@@ -566,6 +533,239 @@ module Session = struct
         ({ model with background_error = Some error }, Cmd.none)
     | Command_finished _ -> (model, Cmd.none)
     | Error error -> ({ model with error = Some error }, Cmd.none)
+end
+
+module Project_tabs = struct
+  type screen =
+    | Directories
+    | Sessions of Sessions.model
+    | Session of Sessions.model * Session.model
+
+  type page = { generation : int; screen : screen }
+
+  type model = {
+    tabs : int list;
+    active : int option;
+    next_id : int;
+    directories : Directories.model;
+    pages : (int * page) list;
+  }
+
+  type content_msg =
+    | Directory_event of Directories.msg
+    | Sessions_event of Sessions.msg
+    | Session_event of Session.msg
+  [@@deriving yojson, variants]
+
+  type msg =
+    | Create
+    | Select of int
+    | Close of int
+    | Back
+    | Refresh
+    | Directories_msg of Directories.msg
+    | Content of int * int * content_msg
+  [@@deriving yojson, variants]
+
+  let init root =
+    ( {
+        tabs = [];
+        active = None;
+        next_id = 1;
+        directories = fst (Directories.init root);
+        pages = [];
+      },
+      Cmd.none )
+
+  let update_directories model message =
+    let directories, cmd = Directories.update model.directories message in
+    ({ model with directories }, Cmd.map directories_msg cmd)
+
+  let put model id page =
+    {
+      model with
+      pages =
+        List.map
+          (fun (key, old) -> (key, if key = id then page else old))
+          model.pages;
+    }
+
+  let wrap id generation message = Content (id, generation, message)
+
+  let view model =
+    let tabs =
+      List.map
+        (fun id ->
+          let active = model.active = Some id in
+          let label = Printf.sprintf "Tab %d" id in
+          row
+            ~background:(if active then Primary_container else Surface)
+            [
+              button ~event:(Select id) (if active then "* " ^ label else label);
+              button ~event:(Close id) "X";
+            ])
+        model.tabs
+    in
+    let strip =
+      row ~weights:[ 1; 0 ]
+        [ row ~horizontal_scroll:true tabs; button ~event:Create "+" ]
+    in
+    let content =
+      match model.active with
+      | None -> []
+      | Some id -> (
+          match List.assoc_opt id model.pages with
+          | None -> []
+          | Some { generation; screen } ->
+              let content =
+                match screen with
+                | Directories ->
+                    Components.map directory_event
+                      (Directories.view model.directories)
+                | Sessions sessions ->
+                    Components.map sessions_event (Sessions.view sessions)
+                | Session (_, session) ->
+                    Components.map session_event (Session.view session)
+              in
+              [ Components.map (wrap id generation) content ])
+    in
+    column ~stretch:true
+      ~weights:(if content = [] then [ 0 ] else [ 0; 1 ])
+      (strip :: content)
+
+  let session_target model id generation =
+    match List.assoc_opt id model.pages with
+    | Some { generation = current; screen = Session (_, session) }
+      when generation = current ->
+        Some session
+    | _ -> None
+
+  let update_content model id page message =
+    let same screen lift (value, cmd) =
+      ( put model id { page with screen = screen value },
+        Cmd.map (fun msg -> wrap id page.generation (lift msg)) cmd )
+    in
+    let navigate screen lift (value, cmd) =
+      let generation = page.generation + 1 in
+      ( put model id { generation; screen = screen value },
+        Cmd.map (fun msg -> wrap id generation (lift msg)) cmd )
+    in
+    let open_session (sessions : Sessions.model) summary =
+      let sessions = { sessions with loading = false; creating = false } in
+      navigate
+        (fun m -> Session (sessions, m))
+        session_event (Session.init summary)
+    in
+    match (page.screen, message) with
+    | Directories, Directory_event (Directories.Click path)
+      when List.exists
+             (fun name -> Filename.concat model.directories.root name = path)
+             model.directories.entries ->
+        navigate
+          (fun m -> Sessions m)
+          sessions_event
+          (Sessions.init ~directory:path ())
+    | Sessions sessions, Sessions_event (Sessions.Select id') -> (
+        match
+          List.find_opt
+            (fun (s : Runtime.opencode_session) -> s.id = id')
+            sessions.sessions
+        with
+        | None -> (model, Cmd.none)
+        | Some summary -> open_session sessions summary)
+    | ( Sessions sessions,
+        Sessions_event (Sessions.Created (Ok summary) as message) ) ->
+        let sessions, _ = Sessions.update sessions message in
+        open_session sessions summary
+    | Sessions sessions, Sessions_event message ->
+        same
+          (fun m -> Sessions m)
+          sessions_event
+          (Sessions.update sessions message)
+    | Session (sessions, _), Session_event Session.Missing ->
+        ( put model id
+            {
+              generation = page.generation + 1;
+              screen =
+                Sessions
+                  {
+                    sessions with
+                    error = Some "Selected OpenCode session no longer exists";
+                  };
+            },
+          Cmd.none )
+    | Session (sessions, session), Session_event message ->
+        same
+          (fun m -> Session (sessions, m))
+          session_event
+          (Session.update session message)
+    | _ -> (model, Cmd.none)
+
+  let update model = function
+    | Create ->
+        ( {
+            model with
+            tabs = model.tabs @ [ model.next_id ];
+            active = Some model.next_id;
+            next_id = model.next_id + 1;
+            pages =
+              model.pages
+              @ [ (model.next_id, { generation = 0; screen = Directories }) ];
+          },
+          if model.tabs = [] then
+            Cmd.map directories_msg (Directories.load model.directories.root)
+          else Cmd.none )
+    | Select id when List.mem id model.tabs ->
+        ({ model with active = Some id }, Cmd.none)
+    | Close id when List.mem id model.tabs ->
+        let rec neighbor previous = function
+          | current :: next :: _ when current = id -> Some next
+          | [ current ] when current = id -> previous
+          | current :: rest -> neighbor (Some current) rest
+          | [] -> None
+        in
+        ( {
+            model with
+            tabs = List.filter (( <> ) id) model.tabs;
+            pages = List.remove_assoc id model.pages;
+            active =
+              (if model.active = Some id then neighbor None model.tabs
+               else model.active);
+          },
+          Cmd.none )
+    | Content (id, generation, message) -> (
+        match List.assoc_opt id model.pages with
+        | Some page when page.generation = generation ->
+            update_content model id page message
+        | _ -> (model, Cmd.none))
+    | (Back | Refresh) as message -> (
+        match
+          Option.bind model.active (fun id ->
+              Option.map
+                (fun page -> (id, page))
+                (List.assoc_opt id model.pages))
+        with
+        | None -> (model, Cmd.none)
+        | Some (id, page) -> (
+            match (message, page.screen) with
+            | Back, Directories -> (model, Cmd.none)
+            | Back, (Sessions _ | Session _) ->
+                let screen =
+                  match page.screen with
+                  | Session (sessions, _) -> Sessions sessions
+                  | _ -> Directories
+                in
+                ( put model id { generation = page.generation + 1; screen },
+                  Cmd.none )
+            | Refresh, Directories -> update_directories model Directories.Load
+            | Refresh, Sessions _ ->
+                update_content model id page (Sessions_event Sessions.Load)
+            | Refresh, Session _ ->
+                update_content model id page (Session_event Session.Load)
+            | _ -> (model, Cmd.none)))
+    | Directories_msg (Directories.Loaded _ as message) when model.tabs <> [] ->
+        update_directories model message
+    | Select _ | Close _ | Directories_msg _ -> (model, Cmd.none)
 end
 
 module Worktrees = struct

@@ -177,14 +177,19 @@ let () =
           loaded);
       let click =
         Home.Project_tabs_msg
-          (Tabs.Directories_msg (Home_components.Directories.Click project))
+          (Tabs.Content
+             ( 1,
+               0,
+               Tabs.Directory_event (Home_components.Directories.Click project)
+             ))
       in
       assert (contains "event" (Home.msg_to_yojson click) loaded);
+      let (_, _, _), log =
+        capture_stdout (fun () -> with_http_failure (fun () -> post click))
+      in
+      assert (log = "");
+      ignore (post Home.Back);
       let before = Atomic.get Server.state in
-      let (_, _, _), log = capture_stdout (fun () -> post click) in
-      assert (
-        log = Printf.sprintf "Directory clicked: %S\n" project
-        && Atomic.get Server.state = before);
       let status, _, _ =
         post
           (Home.Project_tabs_msg
@@ -325,15 +330,15 @@ let () =
       assert (Cmd.run cmd = None);
       let selected, cmd = Tabs.update two (Tabs.Select 1) in
       assert (Cmd.run cmd = None && selected.directories = loaded.directories);
-      let (clicked, cmd), log =
-        capture_stdout (fun () ->
-            Tabs.update selected
-              (Tabs.Directories_msg (Home_components.Directories.Click path)))
+      let ignored, cmd =
+        Tabs.update selected
+          (Tabs.Content
+             ( 1,
+               0,
+               Tabs.Directory_event
+                 (Home_components.Directories.Click "/unknown") ))
       in
-      assert (clicked = selected && log = "");
-      let result, log = capture_stdout (fun () -> Cmd.run cmd) in
-      assert (
-        result = None && log = Printf.sprintf "Directory clicked: %S\n" path);
+      assert (ignored = selected && Cmd.run cmd = None);
       Unix.rmdir path;
       Unix.rmdir root;
       let refreshing, cmd = Tabs.update selected Tabs.Refresh in
@@ -1287,7 +1292,11 @@ let () =
     }
   in
   let sessions_model : Home_components.Sessions.model =
-    { sessions = [ idle_session; busy_session; retry_session ]; error = None }
+    {
+      (fst (Home_components.Sessions.init ())) with
+      sessions = [ idle_session; busy_session; retry_session ];
+      loading = false;
+    }
   in
   let sessions_home =
     {
@@ -1313,7 +1322,8 @@ let () =
     Remote_dev.Server.to_json opencode_environment
       {
         Remote_dev.Home.screen =
-          Remote_dev.Home.Sessions { sessions = []; error = None };
+          Remote_dev.Home.Sessions
+            { (fst (Home_components.Sessions.init ())) with loading = false };
         emulator = initial_emulator;
       }
   in
@@ -1499,11 +1509,11 @@ let () =
            (Remote_dev.Home.Session_msg
               (Home_components.Session.Run_prompt "/review main branch")))
     with
-    | Some { session; command; arguments } ->
+    | Some ({ session; command; arguments; _ } as operation) ->
         assert (session.id = "busy");
         assert (command = "review");
         assert (arguments = "main branch");
-        { Remote_dev.Server.session; command; arguments }
+        operation
     | None -> assert false
   in
   Atomic.set Remote_dev.Server.state selected_home;

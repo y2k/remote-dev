@@ -7,15 +7,19 @@ Defines the OpenCode server-operation contract for prompts and slash commands su
 ## Requirements
 
 ### Requirement: Execute an OpenCode prompt non-interactively
-The system SHALL submit an ordinary OpenCode prompt to the exact existing session selected in the UI through the local server's asynchronous prompt operation. It SHALL use the selected session's server-supplied directory and the normal model and agent already associated with the session. The event response SHALL NOT wait for completed text or stream response text to Android.
+The system SHALL send ordinary prompt text to the exact selected session through V2 `POST /api/session/{id}/prompt`. It SHALL retain the session's server-owned location, model, and agent by not overriding them from a stale UI snapshot. The Android event SHALL complete after HTTP 200 admits the input, without waiting for generated text or streaming it to Android.
 
 #### Scenario: OpenCode produces completed text
-- **WHEN** OpenCode produces completed text after the local server accepts a prompt for the selected session
-- **THEN** the UI event does not stream that text and a later refresh obtains it from the transcript
+- **WHEN** OpenCode produces text after accepting the prompt
+- **THEN** the event does not stream it and a later refresh obtains it from the transcript
 
 #### Scenario: OpenCode emits no partial text events
-- **WHEN** OpenCode produces only one completed textual part at the end of the background run
-- **THEN** a refresh after completion returns that complete text without requiring token-level updates
+- **WHEN** OpenCode produces only completed text at the end of a run
+- **THEN** refresh after completion returns that text without requiring token-level updates
+
+#### Scenario: Another client changes session configuration
+- **WHEN** another OpenCode client changes the selected session's location, agent, or model before submission
+- **THEN** the prompt uses the current server-owned configuration, not old values from Android's session snapshot
 
 ### Requirement: Preserve the OpenCode input boundary
 The system MUST encode the session ID, directory, prompt, command name, and command arguments as HTTP path, query, or JSON values without shell interpretation.
@@ -25,23 +29,39 @@ The system MUST encode the session ID, directory, prompt, command name, and comm
 - **THEN** OpenCode receives the complete value as prompt text without executing any part through a shell
 
 ### Requirement: Execute OpenCode slash commands
-When the submitted value after trimming starts with `/` followed by a non-whitespace command name, the system SHALL invoke that name through the selected session's OpenCode command operation and SHALL pass the remaining trimmed text as command arguments. A lone `/` SHALL remain an ordinary asynchronous prompt. The system SHALL NOT retry a failed command as a prompt, and the Android event SHALL complete without waiting for the command's agent work to finish.
+After trimming, input starting with `/` and a non-whitespace name SHALL call V2 `POST /api/session/{id}/command` with that name and the remaining trimmed text. A lone `/` SHALL remain an ordinary prompt. HTTP 204 SHALL count as success without a response body. The Android event SHALL return without waiting for the command callback or agent work. A failed command SHALL NOT be retried as a prompt.
 
 #### Scenario: Submit a slash command
-- **WHEN** the user submits ` /review main ` in a selected OpenCode session
-- **THEN** the system invokes the OpenCode command `review` with `main` as its arguments for that session
+- **WHEN** the user submits ` /review main `
+- **THEN** the command operation receives `name=review` and `text=main` for the selected session
 
 #### Scenario: Submit a lone slash
 - **WHEN** the user submits `/`
-- **THEN** the system sends `/` as an ordinary asynchronous prompt
+- **THEN** it is submitted as an ordinary asynchronous prompt
 
 #### Scenario: Submit an unknown command
-- **WHEN** OpenCode reports that the submitted slash command is unknown
-- **THEN** the system reports that failure without running a second prompt
+- **WHEN** OpenCode reports `CommandNotFoundError`
+- **THEN** the selected screen reports the command failure without a fallback prompt or treating the session as deleted
+
+#### Scenario: Command callback has not returned
+- **WHEN** OpenCode is still executing the command callback
+- **THEN** Android can submit another UI event and command completion is handled asynchronously
 
 ### Requirement: Report OpenCode server operation failure
-Failure to connect to the OpenCode server or an unsuccessful session operation SHALL produce an ordinary UI error without terminating the backend.
+Connection, discovery, protocol, or operation failures SHALL produce ordinary UI errors without terminating the backend. The backend SHALL distinguish `SessionNotFoundError` from command and location errors even when they share HTTP 404. A session SHALL NOT be treated as deleted merely because an operation returns HTTP 404. Ambiguously failed writes SHALL NOT be automatically replayed.
 
 #### Scenario: Prompt submission fails
-- **WHEN** the server rejects a prompt or command submitted for the selected session
+- **WHEN** OpenCode rejects a prompt or command
 - **THEN** the selected-session screen exposes the failure and the backend remains available
+
+#### Scenario: Location is unavailable
+- **WHEN** an operation returns `LocationNotFoundError`
+- **THEN** the backend reports a location failure without treating the session as deleted
+
+#### Scenario: Response does not match V2
+- **WHEN** an operation returns malformed JSON or a missing required response field
+- **THEN** the backend reports a protocol failure rather than silently accepting success
+
+#### Scenario: Write outcome is unknown
+- **WHEN** a connection fails after a prompt or command might have been accepted
+- **THEN** the error is reported without automatically resubmitting the operation

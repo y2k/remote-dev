@@ -1,6 +1,6 @@
 # remote_dev
 
-`remote_dev` is a local development tool with an Android client. OpenCode mode starts with zero project tabs and a shared emulator panel; creating a tab shows up to ten recently modified subdirectories. Claude mode starts directly with that directory list. The backend also contains Claude worktree and OpenCode session screens; project-list clicks do not navigate to them.
+`remote_dev` is a local development tool with an Android client. OpenCode mode starts with zero project tabs and a shared emulator panel; creating a tab shows up to ten recently modified subdirectories. Select a folder to browse its OpenCode sessions, open a conversation, or create an empty session within that tab. Claude mode starts directly with the directory list and retains log-only directory clicks.
 
 ## Security
 
@@ -45,9 +45,11 @@ label; `*` and a themed background mark the active tab. `X` removes it.
 Closing the active tab selects the next tab, or the previous one if it was last.
 All tabs can be closed. Tab numbers are not reused until the backend restarts.
 
-Tabs share the same project list for the startup root. They do not open projects
-or agent sessions. Tabs and selection live only in backend memory: reloading or
-reconnecting the client preserves them, restarting the backend clears them.
+Tabs share the same project list for the startup root. Each tab independently
+retains its folder, session list, or chat screen, including loaded conversation
+state and server-held drafts. Switching tabs does not reload data. Closing a tab
+does not delete or interrupt its OpenCode session. Tabs and selection live only
+in backend memory: reconnecting preserves them, restarting the backend clears them.
 
 Build the project:
 
@@ -71,9 +73,9 @@ make run ARGS="--agent opencode"
 
 The startup list shows only immediate real subdirectories, including hidden directories and excluding files and symbolic links. It orders them by each directory's own modification time, newest first, with case-sensitive name ordering for ties, and shows at most ten. Changes inside nested files do not determine the order. An empty root shows `No subdirectories`.
 
-Tap a directory to log its absolute path to the backend console; this does not select it, change screens, or start an agent. The first OpenCode tab created from zero tabs loads the directory list; additional tabs and tab switches reuse it. Pull-to-refresh or the app's `Refresh` menu sends a common event and replaces the complete UI. The backend reloads the shared directory list from the captured startup path when tabs exist, preserving tabs and selection. With zero tabs it returns the empty tab UI without reading directories. In Claude mode it reloads the standalone directory list. System Back preserves the current directory/tab screen. A directory-read failure displays an error and retains the last successful list and any open tabs; refresh retries it. The emulator panel's own refresh is independent.
+In OpenCode mode, tapping a directory opens its session list in the current tab. The first tab created from zero tabs loads directories; additional tabs reuse that shared list. System Back navigates chat → folder sessions → directories, and does nothing at the directory screen or with zero tabs. Pull-to-refresh or the app's `Refresh` menu refreshes only the active screen: directories, folder sessions, or chat details. It preserves other tabs and the emulator; with zero tabs it performs no load. A list-load failure retains existing rows and shows an error; refresh retries. The emulator panel's own refresh is independent. Claude directory clicks only log the escaped absolute path without navigation.
 
-The following commands support the existing OpenCode session screens, which currently have no navigation entry from the directory screen:
+Start the OpenCode shared service before opening a folder's sessions:
 
 ```sh
 opencode service start
@@ -81,9 +83,9 @@ opencode service status
 opencode
 ```
 
-Use the OpenCode terminal to answer permissions or questions. In OpenCode mode the positional path only selects the startup directory-list root; session directories remain server-defined. When active, its session-list screen lists the 20 most recently updated sessions across all projects known to the server, independently of this path, and does not create sessions. Older sessions remain in OpenCode history.
+Use the OpenCode terminal to answer permissions or questions. The folder screen displays its path and up to 20 most recently updated sessions, newest first. Exact-directory filtering precedes the limit; subdirectories and other worktrees are excluded. Older sessions remain in OpenCode history. Select a session to open its conversation.
 
-The runtime also provides `load_opencode_folder_sessions directory` for the dependent folder-navigation change. It requests an exact directory match before the 20-session limit, excluding subdirectories and other worktrees; this does not add navigation or a creation control to the current UI.
+The **Создать новую сессию** button above the list creates a session in the selected folder and immediately opens its empty chat, without a form or an automatic prompt. OpenCode owns the identity and configuration; an absent title displays as `Без названия`. Back returns to the list with the new session included. During creation the button is replaced by a progress label. Creation failures leave the list visible and allow explicit retry; writes are never retried automatically. An empty folder still offers creation. Initial load failure is shown as an error rather than a successful empty list.
 
 The backend discovers the already-running service from `$XDG_STATE_HOME/opencode/service.json`, defaulting to `~/.local/state/opencode/service.json`. Run it as the same user with the same state directory as OpenCode. It verifies `/api/info` against the registered PID and version with a five-second health timeout and accepts only local HTTP endpoints. Each session operation reads registration again, so a service restart does not require a backend restart.
 
@@ -135,9 +137,17 @@ event value advertised by the node into `event`:
 ```
 
 `value` is either a string or `null`; the server substitutes a string value for the
-`"__VALUE__"` marker in an input event. Pull-to-refresh always sends the provider-neutral root `Refresh` event without a tab identifier. It reloads the common list when tabs exist (no directory read with zero tabs), the standalone directory list, or, when active, the existing Claude worktree list, OpenCode all-server session list, or selected OpenCode session. Finite load commands return `application/x-ndjson` with documents before and after the load.
+`"__VALUE__"` marker in an input event. Pull-to-refresh always sends the provider-neutral root `Refresh` event without a tab identifier. In OpenCode it refreshes the active tab's directory list, folder sessions, or selected session; with zero tabs it performs no load. Standalone directory and Claude worktree refresh retain their behavior. Finite load commands return `application/x-ndjson` with complete documents before and after the load.
 
-Tab controls advertise `["Project_tabs_msg",["Create"]]`, `["Project_tabs_msg",["Select",1]]`, or `["Project_tabs_msg",["Close",1]]`. Directory buttons inside tabs advertise events such as `["Project_tabs_msg",["Directories_msg",["Click","/projects/example"]]]`; standalone directory buttons omit the outer wrapper. Processing a directory click writes a single escaped path log line to backend stdout and returns an NDJSON document with unchanged UI state. Internal directory-load results, including nested tab results, cannot be submitted by clients.
+Tab controls advertise `["Project_tabs_msg",["Create"]]`, `["Project_tabs_msg",["Select",1]]`, or `["Project_tabs_msg",["Close",1]]`. Content events include the tab ID and screen generation, for example:
+
+```json
+{"event":["Project_tabs_msg",["Content",1,0,["Directory_event",["Click","/projects/example"]]]],"value":null}
+{"event":["Project_tabs_msg",["Content",1,1,["Sessions_event",["Create"]]]],"value":null}
+{"event":["Project_tabs_msg",["Content",1,2,["Session_event",["Run_prompt","__VALUE__"]]]],"value":"Hello"}
+```
+
+Clients copy advertised events rather than constructing IDs or generations. Back and Refresh remain root events. Navigation changes the screen generation; stale content events and completions cannot affect a replacement screen or recreate a closed tab. Background command results return to their originating tab even when it is inactive. Client-submitted internal load, creation, submission, and command-completion results are rejected, including nested events. Standalone Claude directory buttons retain `["Directories_msg",["Click","/projects/example"]]` and log one escaped path line without navigation.
 
 A Claude prompt returns `application/x-ndjson`. Each nonempty line is a compact complete UI document with the current response accumulated so far; the Android client replaces its displayed document for every line until the response closes. If Claude fails after the stream starts, the final document contains the error.
 

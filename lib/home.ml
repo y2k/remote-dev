@@ -93,7 +93,10 @@ let update environment ({ screen; _ } as state) message =
       update_page state
         (fun model -> Project_tabs model)
         lift_project_tabs Project_tabs.update model message
-  | Project_tabs _, Back -> (state, Cmd.none)
+  | Project_tabs model, Back ->
+      update_page state
+        (fun model -> Project_tabs model)
+        lift_project_tabs Project_tabs.update model Project_tabs.Back
   | Directories model, Initialize_emulator message ->
       let emulator, _ = Emulator.update state.emulator message in
       update_page { state with emulator }

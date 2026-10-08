@@ -48,6 +48,18 @@ let decode body =
           (Home.Project_tabs_msg
              (Project_tabs.Directories_msg (Directories.Loaded _)))
       | Ok (Home.Sessions_msg (Sessions.Loaded _))
+      | Ok (Home.Sessions_msg (Sessions.Created _))
+      | Ok
+          (Home.Project_tabs_msg
+             (Project_tabs.Content
+                ( _,
+                  _,
+                  ( Project_tabs.Directory_event (Directories.Loaded _)
+                  | Project_tabs.Sessions_event
+                      (Sessions.Loaded _ | Sessions.Created _)
+                  | Project_tabs.Session_event
+                      ( Session.Loaded _ | Session.Missing | Session.Submitted _
+                      | Session.Command_finished _ ) ) )))
       | Ok (Home.Session_msg (Session.Loaded _))
       | Ok (Home.Session_msg Session.Missing)
       | Ok (Home.Session_msg (Session.Submitted _))
@@ -106,42 +118,67 @@ type opencode_command = {
   session : Runtime.opencode_session;
   command : string;
   arguments : string;
+  tab : (int * int) option;
 }
+
+let opencode_input state = function
+  | Home.Session_msg (Session.Run_prompt prompt) -> (
+      match state.Home.screen with
+      | Home.Session (_, { session; _ }) -> Some (session, prompt, None)
+      | _ -> None)
+  | Home.Project_tabs_msg
+      (Project_tabs.Content
+         (id, generation, Project_tabs.Session_event (Session.Run_prompt prompt)))
+    -> (
+      match state.Home.screen with
+      | Home.Project_tabs model ->
+          Option.map
+            (fun (model : Session.model) ->
+              (model.session, prompt, Some (id, generation)))
+            (Project_tabs.session_target model id generation)
+      | _ -> None)
+  | _ -> None
 
 let start_opencode_command environment body =
   match (environment, decode body) with
-  | ( Runtime.OpenCode _,
-      Ok (Home.Session_msg (Session.Run_prompt prompt) as message) ) -> (
-      match Runtime.opencode_input prompt with
-      | `Prompt _ -> None
-      | `Command (command, arguments) -> (
-          let next, _ = step environment message in
-          match next.screen with
-          | Home.Session (_, { session; _ }) ->
-              Some { session; command; arguments }
-          | Home.Project_tabs _ | Home.Directories _ | Home.Worktrees _
-          | Home.New_worktree _ | Home.Worktree _ | Home.Sessions _ ->
-              None))
+  | Runtime.OpenCode _, Ok message -> (
+      match opencode_input (Atomic.get state) message with
+      | Some (session, prompt, tab) -> (
+          match Runtime.opencode_input prompt with
+          | `Prompt _ -> None
+          | `Command (command, arguments) ->
+              ignore (step environment message);
+              Some { session; command; arguments; tab })
+      | None -> None)
   | (Runtime.Claude _ | Runtime.OpenCode _), (Ok _ | Error _) -> None
 
-let complete_opencode_command environment { session; command; arguments } =
+let complete_opencode_command environment { session; command; arguments; tab } =
   let result =
     try
       Runtime.submit_opencode_command session command arguments;
       Ok ()
     with exn -> Error (Printexc.to_string exn)
   in
-  ignore
-    (dispatch environment
-       (Home.Session_msg (Session.Command_finished (session.id, result))))
+  let message = Session.Command_finished (session.id, result) in
+  let message =
+    match tab with
+    | None -> Home.Session_msg message
+    | Some (id, generation) ->
+        Home.Project_tabs_msg
+          (Project_tabs.Content
+             (id, generation, Project_tabs.Session_event message))
+  in
+  ignore (dispatch environment message)
 
 let start_opencode_prompt environment body =
   match (environment, decode body) with
-  | ( Runtime.OpenCode _,
-      Ok (Home.Session_msg (Session.Run_prompt prompt) as message) ) -> (
-      match Runtime.opencode_input prompt with
-      | `Prompt _ -> Some (step environment message)
-      | `Command _ -> None)
+  | Runtime.OpenCode _, Ok message -> (
+      match opencode_input (Atomic.get state) message with
+      | Some (_, prompt, _) -> (
+          match Runtime.opencode_input prompt with
+          | `Prompt _ -> Some (step environment message)
+          | `Command _ -> None)
+      | None -> None)
   | (Runtime.Claude _ | Runtime.OpenCode _), (Ok _ | Error _) -> None
 
 let stream_event environment = function
@@ -352,11 +389,10 @@ let respond environment ~net ~clock ~sw ~domain_mgr { Gluten.reqd; _ } =
               if event_request then start_opencode_command environment body
               else None
             with
-            | Some { session; command; arguments } ->
+            | Some command ->
                 Eio.Fiber.fork ~sw (fun () ->
                     Runtime.with_opencode_http ~net ~clock (fun () ->
-                        complete_opencode_command environment
-                          { session; command; arguments }));
+                        complete_opencode_command environment command));
                 reply
                   ( `OK,
                     document environment (Atomic.get state),
