@@ -1,5 +1,10 @@
 # Spec Delta
 
+Archive reconciliation (2026-10-11): `List existing OpenCode sessions` was
+superseded by the archived change `2026-10-09-folder-sessions-in-tabs` before this change
+was archived. Its folder-scoped requirement is already in the main spec;
+the earlier global-list delta is omitted here to avoid reverting that behavior.
+
 ## MODIFIED Requirements
 
 ### Requirement: Authenticate requests to the local OpenCode server
@@ -45,26 +50,6 @@ The backend SHALL discover the already-running V2 service from `$XDG_STATE_HOME/
 - **WHEN** OpenCode restarts with a new registration before a later user operation
 - **THEN** that operation discovers the new connection without requiring a backend restart
 - **AND** an ambiguously failed write is not automatically replayed
-
-### Requirement: List existing OpenCode sessions
-When active, the existing global session-list screen SHALL list at most the 20 most recently updated sessions across projects, newest first, using a single V2 session page. It SHALL use the service's active execution map and request retry details only for displayed active sessions. Each row SHALL display title, directory, and status and select that exact session. Older sessions SHALL remain in OpenCode history. This screen SHALL NOT list Git worktrees or provide session creation. Startup SHALL remain the empty tab UI; tab controls and project-list clicks SHALL NOT navigate to this screen in this change.
-
-#### Scenario: Server has sessions from multiple directories
-- **WHEN** the global session-list screen loads sessions belonging to different directories
-- **THEN** it displays up to 20 returned sessions with their own directories
-
-#### Scenario: Server has more than 20 sessions
-- **WHEN** OpenCode returns 20 sessions ordered by most recent update
-- **THEN** the screen displays them in that order without requesting another session page
-- **AND** additional retry detail reads address only displayed active sessions
-
-#### Scenario: Server has no sessions
-- **WHEN** the global session query succeeds with an empty list
-- **THEN** the screen states that there are no sessions and offers no creation control
-
-#### Scenario: Backend starts in OpenCode mode
-- **WHEN** the backend initializes in OpenCode mode
-- **THEN** it displays zero tabs and the tab creation control rather than loading sessions
 
 ### Requirement: Render the selected session transcript
 Selecting a session SHALL load its V2 messages by server-supplied session ID and display title, directory, status, and all user and assistant text in conversation order across all pages. User `text` and assistant textual `content` SHALL be rendered; other message types and non-text content SHALL NOT be rendered. A missing title SHALL display as `Без названия` without renaming the OpenCode session.
