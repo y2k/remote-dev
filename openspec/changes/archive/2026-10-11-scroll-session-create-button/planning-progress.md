@@ -1,0 +1,6 @@
+- [x] Inspect project context and session-list layout.
+- [x] Create proposal.
+- [x] Create delta spec.
+- [x] Create design.
+- [x] Create implementation tasks.
+- [x] Validate artifacts and check final status (`openspec validate --strict`: valid; status: 4/4).

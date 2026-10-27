@@ -331,16 +331,16 @@ module Sessions = struct
       [
         column errors;
         text "OpenCode sessions:";
-        column
-          (match directory with
-          | None -> []
-          | Some path ->
-              [
-                text path;
-                (if creating then text "Creating session..."
-                 else button ~event:Create "Создать новую сессию");
-              ]);
-        column ~stretch:true ~gap:(Gap.make 12) sessions;
+        column (match directory with None -> [] | Some path -> [ text path ]);
+        column ~stretch:true ~gap:(Gap.make 12)
+          ((match directory with
+             | None -> []
+             | Some _ ->
+                 [
+                   (if creating then text "Creating session..."
+                    else button ~event:Create "Создать новую сессию");
+                 ])
+          @ sessions);
       ]
 
   let load directory : msg Cmd.t =
