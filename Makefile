@@ -1,3 +1,5 @@
+ARGS ?= --agent opencode
+
 .PHONY: test
 test: build
 	dune test
@@ -7,9 +9,9 @@ build:
 	dune build @unused-libs
 
 .PHONY: run
-run:
+run: android-run
 	@pids=$$(lsof -tiTCP:8080 -sTCP:LISTEN); if [ -n "$$pids" ]; then kill $$pids; fi
-	dune exec remote_dev -- $(ARGS)
+	dune exec remote_dev -- $(ARGS) "$(abspath $(CURDIR)/..)"
 
 .PHONY: watch
 watch:
@@ -17,6 +19,5 @@ watch:
 
 .PHONY: android-run
 android-run:
-	export ANDROID_SERIAL=abf51f11 && \
-		./android/gradlew --no-daemon -p android :app:installDebug && \
+	./android/gradlew --no-daemon -p android :app:installDebug && \
 		adb shell am start -n io.y2k.remote_client/.MainActivity
