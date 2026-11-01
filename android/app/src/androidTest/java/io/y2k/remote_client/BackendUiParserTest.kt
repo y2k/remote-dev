@@ -42,6 +42,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
@@ -49,6 +50,9 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeDown
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.ByteArrayOutputStream
@@ -67,6 +71,51 @@ import org.junit.runner.RunWith
 @OptIn(ExperimentalTestApi::class)
 class BackendUiParserTest {
     @get:Rule val composeRule = createComposeRule()
+
+    @Test
+    fun retainsTextStylesAndDefaultsLegacyText() {
+        val legacy = parseUiNode("""{"@type":"text","text":"Пример"}""")
+        assertEquals(UiNode.Text("Пример"), legacy)
+        assertEquals(legacy, parseUiNode("""{"@type":"text","text":"Пример","style":"body"}"""))
+        for ((name, role) in listOf("heading" to TextStyleRole.Heading,
+            "caption" to TextStyleRole.Caption, "code" to TextStyleRole.Code)) {
+            assertEquals(UiNode.Text("Пример", role), parseUiNode(
+                """{"@type":"text","text":"Пример","style":"$name"}"""))
+        }
+    }
+
+    @Test
+    fun rejectsInvalidTextStyles() {
+        for (value in listOf("null", "1", "true", "[]", "{}", "\"unknown\"", "\"Heading\"")) {
+            assertTrue("Accepted style=$value", runCatching {
+                parseUiNode("""{"@type":"text","text":"Example","style":$value}""")
+            }.exceptionOrNull() is IllegalArgumentException)
+        }
+    }
+
+    @Test
+    fun rendersServerTextRoles() {
+        val node = parseUiNode("""{"@type":"column","children":[
+            {"@type":"text","text":"Заголовок","style":"heading"},
+            {"@type":"text","text":"Сообщение"},
+            {"@type":"text","text":"Статус","style":"caption"},
+            {"@type":"text","text":"/projects/пример","style":"code"}]}""")
+        composeRule.setContent {
+            MyApplicationTheme { UiNodeContent(node, {}, { _, _ -> }, false) }
+        }
+        for ((text, size, height) in listOf(
+            Triple("Заголовок", 24, 30), Triple("Сообщение", 14, 21),
+            Triple("Статус", 12, 18), Triple("/projects/пример", 12, 18),
+        )) {
+            val results = mutableListOf<TextLayoutResult>()
+            composeRule.onNodeWithText(text).performSemanticsAction(SemanticsActions.GetTextLayoutResult) {
+                it(results)
+            }
+            val style = results.single().layoutInput.style
+            assertEquals(size.sp, style.fontSize)
+            assertEquals(height.sp, style.lineHeight)
+        }
+    }
 
     @Test
     fun rejectsInvalidHorizontalScroll() {

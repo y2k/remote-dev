@@ -1,0 +1,36 @@
+{
+  "projectId": "892911315436932478",
+  "title": "RemoteDev",
+  "screens": [
+    {
+      "screenId": "f2932c0529784c72abbf9adf0e7446f6",
+      "title": "remote_dev — Проекты",
+      "deviceType": "DESKTOP"
+    },
+    {
+      "screenId": "0e901ddb278f4548a9552906466ffa6b",
+      "title": "remote_dev — Ряд иконок 24x24",
+      "deviceType": "DESKTOP"
+    },
+    {
+      "screenId": "0f2c991fc0b7437bb698c9bcf650315f",
+      "title": "remote_dev — Сессии project-one",
+      "deviceType": "DESKTOP"
+    },
+    {
+      "screenId": "34884f6922d54ea9a2c7dc0834534f45",
+      "title": "remote_dev — Нужно решение",
+      "deviceType": "DESKTOP"
+    }
+  ],
+  "designSystem": {
+    "assetId": "4977223382853167281",
+    "name": "Workbench Devtools",
+    "primaryColor": "#b4c5ff",
+    "secondaryColor": "#b0c6ff",
+    "backgroundColor": "#101418",
+    "headlineFont": "Manrope",
+    "bodyFont": "Inter",
+    "codeFont": "JetBrains Mono"
+  }
+}

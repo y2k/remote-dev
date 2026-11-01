@@ -72,6 +72,13 @@ enum class ThemeColor(val wireName: String) {
     OutlineVariant("outlineVariant"),
 }
 
+enum class TextStyleRole(val wireName: String) {
+    Body("body"),
+    Heading("heading"),
+    Caption("caption"),
+    Code("code"),
+}
+
 data class UiPadding(val start: Int = 0, val top: Int = 0, val end: Int = 0, val bottom: Int = 0)
 
 data class UiGap(val size: Int = 4, val color: ThemeColor? = null)
@@ -101,7 +108,7 @@ sealed interface UiNode {
         val horizontalScroll: Boolean = false,
     ) : UiNode
 
-    data class Text(val text: String) : UiNode
+    data class Text(val text: String, val style: TextStyleRole = TextStyleRole.Body) : UiNode
 
     data class Button(
         val label: String,
@@ -216,7 +223,10 @@ private fun parseUiNode(node: JSONObject): UiNode {
         "text" ->
             UiNode.Text(
                 node.get("text") as? String
-                    ?: throw IllegalArgumentException("Text must be a string")
+                    ?: throw IllegalArgumentException("Text must be a string"),
+                if (!node.has("style")) TextStyleRole.Body else
+                    TextStyleRole.entries.firstOrNull { it.wireName == node.opt("style") }
+                        ?: throw IllegalArgumentException("style must be a supported text role"),
             )
         "button" -> {
             val event =

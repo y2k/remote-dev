@@ -783,6 +783,30 @@ let () =
           ("label", `String "Pixel");
           ("event", image_event);
         ]);
+  let () =
+    let open Remote_dev.Components in
+    List.iter
+      (fun (style, name) ->
+        let json =
+          text ~style "Пример /projects/example"
+          |> map succ
+          |> to_json (fun n -> `Int n)
+        in
+        assert (
+          json
+          = `Assoc
+              [
+                ("@type", `String "text");
+                ("text", `String "Пример /projects/example");
+                ("style", `String name);
+              ]))
+      [
+        (Body, "body");
+        (Heading, "heading");
+        (Caption, "caption");
+        (Code, "code");
+      ]
+  in
   let children = [ Remote_dev.Components.text "Default" ] in
   assert (
     Remote_dev.Components.to_json App.encode

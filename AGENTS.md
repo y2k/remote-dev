@@ -15,6 +15,10 @@
 
 - Before archiving a change, sync its delta specs into the main specs by default, without asking for confirmation, unless the user explicitly requests otherwise.
 
+# Design
+
+- The app design is stored in the Stitch project `RemoteDev` (project ID: `892911315436932478`).
+
 # Server-Defined UI
 
 - Implement server-defined UI on the OCaml backend using The Elm Architecture (TEA): `model`, `msg`, a pure `view`, and `update`.
@@ -28,6 +32,6 @@
 ## Android Device Testing
 
 - These restrictions apply only to commands that interact with an Android device: installation, instrumentation tests, UI checks, screenshots, and other adb operations.
-- Use only the device with ID `abf51f11`. Do not launch or use other devices or emulators.
-- Before device operations, set `export ANDROID_SERIAL=abf51f11`. For tools that do not honor it, select the device explicitly (for example, `adb -s abf51f11`).
+- The repository-root `.envrc` is the source of truth for `ANDROID_SERIAL`. Use only that device; do not launch or use other devices or emulators.
+- Before device operations, read and source the repository-root `.envrc` in the command's shell and confirm `ANDROID_SERIAL` is nonempty. For tools that do not honor it, select the device explicitly (for example, `adb -s "$ANDROID_SERIAL"`).
 - If this device is unavailable, stop only device-dependent checks. Continue applicable host-side checks and report which device checks could not run.

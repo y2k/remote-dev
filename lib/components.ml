@@ -40,6 +40,8 @@ module Border = struct
   let make ~color width = { width = spacing_size width; color }
 end
 
+type text_style = Body | Heading | Caption | Code
+
 type 'event t =
   | Button of string * 'event option
   | Column of
@@ -60,7 +62,7 @@ type 'event t =
       * Border.t option
       * int option
       * 'event t list
-  | Text of string
+  | Text of string * text_style option
   | Edit of string * string option * 'event
   | Voice_input of 'event
   | Image of string * string * 'event option
@@ -104,7 +106,7 @@ let row ?(horizontal_scroll = false) ?weights ?background ?padding ?gap ?border
       Option.map spacing_size corner_radius,
       children )
 
-let text value = Text value
+let text ?style value = Text (value, style)
 let edit ?text ~event label = Edit (label, text, event)
 let voice_input ~event = Voice_input event
 let image ?event ~src ~label () = Image (src, label, event)
@@ -147,7 +149,7 @@ let rec map f = function
           border,
           corner_radius,
           List.map (map f) children )
-  | Text value -> Text value
+  | Text (value, style) -> Text (value, style)
   | Edit (label, text, event) -> Edit (label, text, f event)
   | Voice_input event -> Voice_input (f event)
   | Image (src, label, event) -> Image (src, label, Option.map f event)
@@ -266,7 +268,22 @@ let rec to_json event = function
         | Some weights ->
             fields @ [ ("weights", `List (List.map (fun x -> `Int x) weights)) ]
         | None -> fields)
-  | Text value -> `Assoc [ ("@type", `String "text"); ("text", `String value) ]
+  | Text (value, style) ->
+      `Assoc
+        ([ ("@type", `String "text"); ("text", `String value) ]
+        @
+        match style with
+        | None -> []
+        | Some style ->
+            [
+              ( "style",
+                `String
+                  (match style with
+                  | Body -> "body"
+                  | Heading -> "heading"
+                  | Caption -> "caption"
+                  | Code -> "code") );
+            ])
   | Edit (label, text, action) ->
       let fields =
         [

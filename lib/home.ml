@@ -45,7 +45,7 @@ let view environment { screen; emulator } =
     [
       column
         [
-          text
+          text ~style:Caption
             (match environment with
             | Runtime.Claude _ -> "Agent: Claude"
             | Runtime.OpenCode _ -> "Agent: OpenCode");

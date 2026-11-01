@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -234,7 +236,11 @@ fun UiNodeContent(
         is UiNode.Text ->
             Text(
                 modifier = modifier,
-                style = MaterialTheme.typography.bodyLarge,
+                style = when (node.style) {
+                    TextStyleRole.Body -> MaterialTheme.typography.bodyMedium
+                    TextStyleRole.Heading -> MaterialTheme.typography.headlineLarge
+                    TextStyleRole.Caption, TextStyleRole.Code -> MaterialTheme.typography.bodySmall
+                },
                 color = MaterialTheme.colorScheme.onSurface,
                 text = node.text,
             )
@@ -243,15 +249,21 @@ fun UiNodeContent(
                 modifier = modifier,
                 enabled = !eventInProgress,
                 onClick = { node.event?.let(onButtonEvent) },
-                shape = RoundedCornerShape(12.dp),
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                elevation = ButtonDefaults.buttonElevation(defaultElevation = 1.dp),
             ) {
-                Text(text = node.label)
+                Text(
+                    text = node.label,
+                    style = MaterialTheme.typography.labelLarge,
+                )
             }
         is UiNode.Input -> {
             var value by remember(node, LocalUiDocument.current) { mutableStateOf(node.text) }
             TextField(
                 value = value,
                 onValueChange = { value = it },
+                textStyle = MaterialTheme.typography.bodyLarge,
                 label = { Text(node.label) },
                 singleLine = true,
                 enabled = !eventInProgress,

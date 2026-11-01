@@ -22,8 +22,8 @@ module Directories = struct
     in
     column ~stretch:true ~weights:[ 0; 0; 0; 1 ]
       [
-        text "Directories";
-        text root;
+        text ~style:Heading "Directories";
+        text ~style:Code root;
         column errors;
         column ~stretch:true entries;
       ]
@@ -65,7 +65,10 @@ module New_worktree = struct
   let view { error } : msg Components.t =
     let content =
       column ~stretch:true
-        [ text "New worktree"; edit ~event:(Create "__VALUE__") "Branch" ]
+        [
+          text ~style:Heading "New worktree";
+          edit ~event:(Create "__VALUE__") "Branch";
+        ]
     in
     match error with
     | None -> content
@@ -136,7 +139,7 @@ module Emulator = struct
           | Some error -> [ text ("Error: " ^ error) ]);
         column
           [
-            text "Emulators";
+            text ~style:Heading "Emulators";
             row ~gap:(Gap.make 8)
               (button ~event:Refresh "Refresh"
               :: List.map
@@ -244,8 +247,8 @@ module Worktree = struct
     column ~stretch:true ~weights:[ 0; 0; 0; 1; 0; 0 ]
       [
         column errors;
-        text "Worktree";
-        row [ text "Path:"; text path ];
+        text ~style:Heading "Worktree";
+        row [ text ~style:Caption "Path:"; text ~style:Code path ];
         column messages;
         column shortcuts;
         row ~weights:[ 1; 0 ]
@@ -320,9 +323,9 @@ module Sessions = struct
                   row ~weights:[ 1; 0 ] ~gap:(Gap.make 12)
                     [
                       button ~event:(Select session.id) session.title;
-                      text ("Status: " ^ status session.status);
+                      text ~style:Caption ("Status: " ^ status session.status);
                     ];
-                  text session.directory;
+                  text ~style:Code session.directory;
                 ])
             sessions
     in
@@ -330,8 +333,11 @@ module Sessions = struct
       ~gap:(Gap.make 12)
       [
         column errors;
-        text "OpenCode sessions:";
-        column (match directory with None -> [] | Some path -> [ text path ]);
+        text ~style:Heading "OpenCode sessions:";
+        column
+          (match directory with
+          | None -> []
+          | Some path -> [ text ~style:Code path ]);
         column ~stretch:true ~gap:(Gap.make 12)
           ((match directory with
              | None -> []
@@ -474,10 +480,10 @@ module Session = struct
     column ~stretch:true ~weights:[ 0; 0; 0; 0; 0; 1; 0; 0 ]
       [
         column errors;
-        text "OpenCode session";
-        text session.title;
-        text session.directory;
-        text ("Status: " ^ status session.status);
+        text ~style:Caption "OpenCode session";
+        text ~style:Heading session.title;
+        text ~style:Code session.directory;
+        text ~style:Caption ("Status: " ^ status session.status);
         column messages;
         column (pending @ stop);
         row ~weights:[ 1; 0 ]
@@ -788,11 +794,17 @@ module Worktrees = struct
     let worktrees =
       worktrees
       |> List.map (fun (w : Runtime.worktree) ->
-          column [ text w.path; button ~event:(Select w.path) w.branch ])
+          column
+            [ text ~style:Code w.path; button ~event:(Select w.path) w.branch ])
     in
     let creation = [ button ~event:Open_creation "New" ] in
     column ~weights:[ 0; 0; 0; 1 ]
-      [ column errors; text "Worktrees:"; column creation; column worktrees ]
+      [
+        column errors;
+        text ~style:Heading "Worktrees:";
+        column creation;
+        column worktrees;
+      ]
 
   let load root : msg Cmd.t =
     Cmd.Run
