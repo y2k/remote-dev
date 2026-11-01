@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,6 +25,10 @@ import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.Surface
+import io.y2k.remote_client.ui.theme.ProjectTitle
+import io.y2k.remote_client.ui.theme.SessionTitle
+import io.y2k.remote_client.ui.theme.CardMeta
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
@@ -143,6 +148,22 @@ fun UiNodeContent(
     modifier: Modifier = Modifier,
 ) {
     when (node) {
+        is UiNode.TabStrip -> TabStripContent(node, onButtonEvent, eventInProgress, modifier)
+        is UiNode.Card -> Surface(
+            onClick = { onButtonEvent(node.event) },
+            enabled = !eventInProgress,
+            modifier = modifier.fillMaxWidth().heightIn(min = 48.dp),
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            tonalElevation = 0.dp,
+            shadowElevation = 1.dp,
+        ) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                node.children.forEach { child ->
+                    UiNodeContent(child, onButtonEvent, onInputEvent, eventInProgress, loadImage)
+                }
+            }
+        }
         is UiNode.Column -> {
             val gaps = rememberGapDrawing(node, node.gap, node.children.size, horizontal = false)
             Column(
@@ -240,8 +261,12 @@ fun UiNodeContent(
                     TextStyleRole.Body -> MaterialTheme.typography.bodyMedium
                     TextStyleRole.Heading -> MaterialTheme.typography.headlineLarge
                     TextStyleRole.Caption, TextStyleRole.Code -> MaterialTheme.typography.bodySmall
+                    TextStyleRole.ProjectTitle -> ProjectTitle
+                    TextStyleRole.SessionTitle -> SessionTitle
+                    TextStyleRole.CardMeta -> CardMeta
                 },
-                color = MaterialTheme.colorScheme.onSurface,
+                color = if (node.style == TextStyleRole.CardMeta) MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.onSurface,
                 text = node.text,
             )
         is UiNode.Button ->

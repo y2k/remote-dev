@@ -146,7 +146,7 @@ let () =
       assert (status = `OK && media = "application/json");
       let initial = J.from_string body in
       assert (
-        contains "event"
+        contains "addEvent"
           (Home.msg_to_yojson (Home.Project_tabs_msg Tabs.Create))
           initial);
       assert (not (contains "text" (`String "Directories") initial));
@@ -165,14 +165,15 @@ let () =
       assert (List.length documents = 2);
       let loaded = List.nth documents 1 in
       assert (contains "text" (`String root) loaded);
-      assert (contains "label" (`String "project") loaded);
+      assert (contains "text" (`String "project") loaded);
+      assert (contains "@type" (`String "card") loaded);
       assert ((tabs ()).directories.entries = [ "project" ]);
       assert (
-        contains "event"
+        contains "selectEvent"
           (Home.msg_to_yojson (Home.Project_tabs_msg (Tabs.Select 1)))
           loaded);
       assert (
-        contains "event"
+        contains "closeEvent"
           (Home.msg_to_yojson (Home.Project_tabs_msg (Tabs.Close 1)))
           loaded);
       let click =
@@ -287,6 +288,29 @@ let () =
     | _ -> false)
 
 let () =
+  let open Remote_dev.Components in
+  let wrap value = `List [ `String "Wrapped"; `String value ] in
+  let encode node = node |> map wrap |> to_json Fun.id in
+  assert (
+    encode (tab_strip ~add_event:"add" [])
+    = J.from_string
+        {|{"@type":"tab_strip","tabs":[],"addEvent":["Wrapped","add"]}|});
+  let tab id selected =
+    {
+      id;
+      label = "Tab " ^ id;
+      selected;
+      select_event = "select" ^ id;
+      close_event = "close" ^ id;
+    }
+  in
+  assert (
+    encode
+      (column [ tab_strip ~add_event:"add" [ tab "1" false; tab "2" true ] ])
+    = J.from_string
+        {|{"@type":"column","children":[{"@type":"tab_strip","tabs":[{"id":"1","label":"Tab 1","selected":false,"selectEvent":["Wrapped","select1"],"closeEvent":["Wrapped","close1"]},{"id":"2","label":"Tab 2","selected":true,"selectEvent":["Wrapped","select2"],"closeEvent":["Wrapped","close2"]}],"addEvent":["Wrapped","add"]}]}|})
+
+let () =
   let module Tabs = Home_components.Project_tabs in
   let initial, cmd = Tabs.init "/missing-project-root" in
   assert (initial.tabs = [] && initial.active = None && Cmd.run cmd = None);
@@ -388,36 +412,27 @@ let () =
   let initial, _ = Tabs.init "/projects" in
   let empty = json initial in
   let strip = children empty |> List.hd in
-  let viewport, add =
-    match children strip with
-    | [ viewport; add ] -> (viewport, add)
-    | _ -> assert false
-  in
-  assert (J.Util.member "weights" strip = `List [ `Int 1; `Int 0 ]);
-  assert (J.Util.member "horizontalScroll" viewport = `Bool true);
-  assert (children viewport = []);
-  assert (J.Util.member "label" add = `String "+");
-  assert (J.Util.member "event" add = Tabs.msg_to_yojson Tabs.Create);
+  assert (J.Util.member "@type" strip = `String "tab_strip");
+  assert (J.Util.member "tabs" strip = `List []);
+  assert (J.Util.member "addEvent" strip = Tabs.msg_to_yojson Tabs.Create);
   assert (List.length (children empty) = 1);
   let first = Tabs.update initial Tabs.Create |> fst in
   let second = Tabs.update first Tabs.Create |> fst in
   let document = json second in
   let strip = children document |> List.hd in
-  let tabs = children strip |> List.hd |> children in
+  let tabs = J.Util.member "tabs" strip |> J.Util.to_list in
   assert (List.length tabs = 2);
   List.iteri
     (fun index tab ->
       let id = index + 1 in
-      match children tab with
-      | [ select; close ] ->
-          assert (
-            J.Util.member "event" select = Tabs.msg_to_yojson (Tabs.Select id));
-          assert (
-            J.Util.member "event" close = Tabs.msg_to_yojson (Tabs.Close id))
-      | _ -> assert false)
+      assert (J.Util.member "id" tab = `String (string_of_int id));
+      assert (J.Util.member "label" tab = `String (Printf.sprintf "Tab %d" id));
+      assert (J.Util.member "selected" tab = `Bool (id = 2));
+      assert (
+        J.Util.member "selectEvent" tab = Tabs.msg_to_yojson (Tabs.Select id));
+      assert (
+        J.Util.member "closeEvent" tab = Tabs.msg_to_yojson (Tabs.Close id)))
     tabs;
-  assert (
-    J.Util.member "background" (List.nth tabs 1) = `String "primaryContainer");
   assert (List.length (children document) = 2);
   let closed = Tabs.update second (Tabs.Close 2) |> fst in
   let closed = Tabs.update closed (Tabs.Close 1) |> fst in
@@ -805,7 +820,50 @@ let () =
         (Heading, "heading");
         (Caption, "caption");
         (Code, "code");
+        (Project_title, "projectTitle");
+        (Session_title, "sessionTitle");
+        (Card_meta, "cardMeta");
       ]
+  in
+  let () =
+    let open Remote_dev.Components in
+    let tree =
+      column
+        [
+          card ~event:"select"
+            [
+              text ~style:Session_title "Session";
+              card ~event:"nested" [ text ~style:Card_meta "/projects/demo" ];
+              button ~event:"child" "Child";
+            ];
+        ]
+    in
+    let json =
+      tree
+      |> map (fun action ->
+          `List [ `String "Tab"; `Int 7; `Int 2; `String action ])
+      |> to_json Fun.id
+    in
+    let open Yojson.Basic.Util in
+    let card = json |> member "children" |> to_list |> List.hd in
+    assert (card |> member "@type" = `String "card");
+    assert (
+      card |> member "event"
+      = `List [ `String "Tab"; `Int 7; `Int 2; `String "select" ]);
+    match card |> member "children" |> to_list with
+    | [ title; nested; child ] ->
+        assert (title |> member "text" = `String "Session");
+        assert (title |> member "style" = `String "sessionTitle");
+        assert (
+          nested |> member "event"
+          = `List [ `String "Tab"; `Int 7; `Int 2; `String "nested" ]);
+        assert (
+          nested |> member "children" |> to_list |> List.hd |> member "style"
+          = `String "cardMeta");
+        assert (
+          child |> member "event"
+          = `List [ `String "Tab"; `Int 7; `Int 2; `String "child" ])
+    | _ -> assert false
   in
   let children = [ Remote_dev.Components.text "Default" ] in
   assert (
@@ -955,6 +1013,37 @@ let () =
     | None -> assert false
   in
   let module Directories = Home_components.Directories in
+  let () =
+    let open J.Util in
+    let document =
+      Directories.view
+        { root = "/projects"; entries = [ "second"; "first" ]; error = None }
+      |> Remote_dev.Components.to_json Directories.msg_to_yojson
+    in
+    let cards =
+      document |> member "children" |> to_list |> List.rev |> List.hd
+    in
+    assert (cards |> member "gap" |> member "size" = `Int 8);
+    List.iter2
+      (fun name card ->
+        assert (card |> member "@type" = `String "card");
+        assert (
+          card |> member "event"
+          = `List [ `String "Click"; `String ("/projects/" ^ name) ]);
+        assert (
+          card |> member "children"
+          = `List
+              [
+                `Assoc
+                  [
+                    ("@type", `String "text");
+                    ("text", `String name);
+                    ("style", `String "projectTitle");
+                  ];
+              ]))
+      [ "second"; "first" ]
+      (cards |> member "children" |> to_list)
+  in
   let root = Filename.temp_dir "remote-dev-ui-" "" |> Unix.realpath in
   let cwd = Sys.getcwd () in
   Fun.protect
@@ -1330,6 +1419,57 @@ let () =
   in
   let sessions_document =
     Remote_dev.Server.to_json opencode_environment sessions_home
+  in
+  let () =
+    let open J.Util in
+    List.iter
+      (fun creating ->
+        let model =
+          { sessions_model with directory = Some "/projects"; creating }
+        in
+        let document =
+          Home_components.Sessions.view model
+          |> Remote_dev.Components.to_json
+               Home_components.Sessions.msg_to_yojson
+        in
+        assert (
+          document |> member "weights"
+          = `List [ `Int 0; `Int 0; `Int 0; `Int 1 ]);
+        let list =
+          document |> member "children" |> to_list |> List.rev |> List.hd
+        in
+        assert (list |> member "gap" |> member "size" = `Int 8);
+        match list |> member "children" |> to_list with
+        | control :: cards ->
+            if creating then
+              assert (control |> member "text" = `String "Creating session...")
+            else assert (control |> member "event" = `List [ `String "Create" ]);
+            List.iter2
+              (fun (id, title, path, status) card ->
+                assert (card |> member "@type" = `String "card");
+                assert (
+                  card |> member "event"
+                  = `List [ `String "Select"; `String id ]);
+                let children = card |> member "children" |> to_list in
+                assert (
+                  List.map (member "text") children
+                  = List.map (fun s -> `String s) [ title; path; status ]);
+                assert (
+                  List.map (member "style") children
+                  = List.map
+                      (fun s -> `String s)
+                      [ "sessionTitle"; "cardMeta"; "cardMeta" ]))
+              [
+                ("idle", "Idle session", "/tmp/idle", "Status: idle");
+                ("busy", "Busy session", "/tmp/busy", "Status: busy");
+                ( "retry",
+                  "Retry session",
+                  "/tmp/retry",
+                  "Status: retry: backoff" );
+              ]
+              cards
+        | _ -> assert false)
+      [ false; true ]
   in
   assert (has_text "Agent: OpenCode" sessions_document);
   assert (has_text "Status: idle" sessions_document);

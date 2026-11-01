@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+while read -r local_ref local_oid remote_ref remote_oid; do
+    # A deletion sends no commits.
+    case "$local_oid" in
+        *[!0]*) ;;
+        *) continue ;;
+    esac
+
+    if ! command -v gitleaks >/dev/null 2>&1; then
+        echo "pre-push: install gitleaks and ensure it is on PATH." >&2
+        exit 1
+    fi
+
+    range=$local_oid
+    # New refs or unavailable remote history require scanning all local history.
+    if git cat-file -e "$remote_oid^{commit}" 2>/dev/null; then
+        range="$remote_oid..$local_oid"
+    fi
+
+    git rev-list "$range" >/dev/null
+    if ! gitleaks git --redact --no-banner --verbose \
+        --log-opts="--full-history -m $range" </dev/null; then
+        echo "pre-push: secret scan failed; push blocked." >&2
+        exit 1
+    fi
+done

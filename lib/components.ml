@@ -40,9 +40,26 @@ module Border = struct
   let make ~color width = { width = spacing_size width; color }
 end
 
-type text_style = Body | Heading | Caption | Code
+type text_style =
+  | Body
+  | Heading
+  | Caption
+  | Code
+  | Project_title
+  | Session_title
+  | Card_meta
+
+type 'event tab = {
+  id : string;
+  label : string;
+  selected : bool;
+  select_event : 'event;
+  close_event : 'event;
+}
 
 type 'event t =
+  | Tab_strip of 'event tab list * 'event
+  | Card of 'event * 'event t list
   | Button of string * 'event option
   | Column of
       bool
@@ -79,6 +96,8 @@ module Cmd = struct
 end
 
 let button ?event title = Button (title, event)
+let card ~event children = Card (event, children)
+let tab_strip ~add_event tabs = Tab_strip (tabs, add_event)
 
 let column ?(stretch = false) ?weights ?background ?padding ?gap ?border
     ?corner_radius children =
@@ -112,6 +131,18 @@ let voice_input ~event = Voice_input event
 let image ?event ~src ~label () = Image (src, label, event)
 
 let rec map f = function
+  | Tab_strip (tabs, add_event) ->
+      Tab_strip
+        ( List.map
+            (fun tab ->
+              {
+                tab with
+                select_event = f tab.select_event;
+                close_event = f tab.close_event;
+              })
+            tabs,
+          f add_event )
+  | Card (event, children) -> Card (f event, List.map (map f) children)
   | Button (title, event) -> Button (title, Option.map f event)
   | Column
       ( stretch,
@@ -206,6 +237,32 @@ let decoration_fields border corner_radius =
   | Some radius -> [ ("cornerRadius", `Int radius) ]
 
 let rec to_json event = function
+  | Tab_strip (tabs, add_event) ->
+      `Assoc
+        [
+          ("@type", `String "tab_strip");
+          ( "tabs",
+            `List
+              (List.map
+                 (fun tab ->
+                   `Assoc
+                     [
+                       ("id", `String tab.id);
+                       ("label", `String tab.label);
+                       ("selected", `Bool tab.selected);
+                       ("selectEvent", event tab.select_event);
+                       ("closeEvent", event tab.close_event);
+                     ])
+                 tabs) );
+          ("addEvent", event add_event);
+        ]
+  | Card (action, children) ->
+      `Assoc
+        [
+          ("@type", `String "card");
+          ("event", event action);
+          ("children", `List (List.map (to_json event) children));
+        ]
   | Voice_input action ->
       `Assoc [ ("@type", `String "voice_input"); ("event", event action) ]
   | Button (label, action) ->
@@ -282,7 +339,10 @@ let rec to_json event = function
                   | Body -> "body"
                   | Heading -> "heading"
                   | Caption -> "caption"
-                  | Code -> "code") );
+                  | Code -> "code"
+                  | Project_title -> "projectTitle"
+                  | Session_title -> "sessionTitle"
+                  | Card_meta -> "cardMeta") );
             ])
   | Edit (label, text, action) ->
       let fields =

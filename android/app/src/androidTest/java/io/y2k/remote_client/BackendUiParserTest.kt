@@ -20,12 +20,18 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.input.InputModeManager
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertWidthIsAtLeast
@@ -33,6 +39,8 @@ import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -48,6 +56,10 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.test.swipeUp
+import androidx.compose.ui.test.swipeLeft
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -71,6 +83,350 @@ import org.junit.runner.RunWith
 @OptIn(ExperimentalTestApi::class)
 class BackendUiParserTest {
     @get:Rule val composeRule = createComposeRule()
+
+    private fun tabStripJson(count: Int = 2, selected: Int = 1): String {
+        val tabs = (1..count).joinToString(",") {
+            """{"id":"$it","label":"Tab $it","selected":${it == selected},"selectEvent":["Select",$it],"closeEvent":["Close",$it]}"""
+        }
+        return """{"@type":"tab_strip","tabs":[$tabs],"addEvent":["Create"]}"""
+    }
+
+    @Test
+    fun parsesTabStripStrictly() {
+        val strip = parseUiNode(tabStripJson()) as UiNode.TabStrip
+        assertEquals(UiEvent("""["Create"]"""), strip.addEvent)
+        assertEquals(listOf(
+            UiTab("1", "Tab 1", true, UiEvent("""["Select",1]"""), UiEvent("""["Close",1]""")),
+            UiTab("2", "Tab 2", false, UiEvent("""["Select",2]"""), UiEvent("""["Close",2]""")),
+        ), strip.tabs)
+        assertEquals(emptyList<UiTab>(), (parseUiNode(tabStripJson(0)) as UiNode.TabStrip).tabs)
+        assertEquals(listOf(strip), (parseUiNode("""{"@type":"column","children":[${tabStripJson()}]}""") as UiNode.Column).children)
+        fun reject(node: JSONObject) {
+            assertTrue("Accepted $node", runCatching { parseUiNode(node.toString()) }.isFailure)
+        }
+        val bad = listOf(JSONObject.NULL, "wrong", 1, false, JSONObject())
+        for (field in listOf("tabs", "addEvent")) {
+            reject(JSONObject(tabStripJson()).apply { remove(field) })
+            for (value in bad) reject(JSONObject(tabStripJson()).put(field, value))
+        }
+        for (field in listOf("id", "label", "selected", "selectEvent", "closeEvent")) {
+            val values = when (field) {
+                "id", "label" -> listOf(JSONObject.NULL, 1, true, JSONArray(), JSONObject())
+                "selected" -> listOf(JSONObject.NULL, 1, "true", JSONArray(), JSONObject())
+                else -> bad
+            }
+            reject(JSONObject(tabStripJson()).apply { getJSONArray("tabs").getJSONObject(0).remove(field) })
+            for (value in values) reject(JSONObject(tabStripJson()).apply { getJSONArray("tabs").getJSONObject(0).put(field, value) })
+        }
+        for (value in listOf(JSONObject.NULL, "tab", 1, false, JSONArray()))
+            reject(JSONObject(tabStripJson()).apply { getJSONArray("tabs").put(0, value) })
+        reject(JSONObject(tabStripJson()).apply { getJSONArray("tabs").getJSONObject(0).put("id", "") })
+        reject(JSONObject(tabStripJson()).apply { getJSONArray("tabs").getJSONObject(1).put("id", "1") })
+        reject(JSONObject(tabStripJson(selected = 0)))
+        reject(JSONObject(tabStripJson()).apply { getJSONArray("tabs").getJSONObject(1).put("selected", true) })
+    }
+
+    @Test
+    fun tabStripAppearanceAndTargets() {
+        var dark by mutableStateOf(false)
+        var scale by mutableStateOf(1.25f)
+        var density = 1f
+        var primary = Color.Unspecified
+        var surface = Color.Unspecified
+        var stripFill = Color.Unspecified
+        composeRule.setContent {
+            density = LocalDensity.current.density
+            CompositionLocalProvider(LocalDensity provides Density(density, scale)) {
+                MyApplicationTheme(darkTheme = dark) {
+                    primary = MaterialTheme.colorScheme.primary
+                    surface = MaterialTheme.colorScheme.surface
+                    stripFill = MaterialTheme.colorScheme.surfaceContainerLow
+                    UiNodeContent(parseUiNode(tabStripJson()), {}, { _, _ -> }, false,
+                        modifier = Modifier.width(600.dp).testTag("strip"))
+                }
+            }
+        }
+        for (isDark in listOf(false, true)) for (fontScale in listOf(1.25f, 2f)) {
+            composeRule.runOnIdle { dark = isDark; scale = fontScale }
+            val first = composeRule.onNodeWithText("Tab 1")
+            val close = composeRule.onNodeWithContentDescription("Close Tab 1")
+            val add = composeRule.onNodeWithContentDescription("Add tab")
+            for (target in listOf(first, close, add))
+                target.assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp)
+            val a = first.fetchSemanticsNode().boundsInRoot
+            val b = close.fetchSemanticsNode().boundsInRoot
+            assertTrue(a.right <= b.left)
+            val layouts = mutableListOf<TextLayoutResult>()
+            first.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+            val text = layouts.single()
+            assertEquals(1, text.lineCount)
+            assertTrue("dark=$isDark scale=$fontScale size=${text.size} constraints=${text.layoutInput.constraints} " +
+                "paragraph=${text.multiParagraph.width}x${text.multiParagraph.height} widthOverflow=${text.didOverflowWidth} heightOverflow=${text.didOverflowHeight}",
+                !text.hasVisualOverflow)
+            assertEquals(14.sp, text.layoutInput.style.fontSize)
+            assertEquals(21.sp, text.layoutInput.style.lineHeight)
+            val root = composeRule.onNodeWithTag("strip").fetchSemanticsNode().boundsInRoot
+            val pixels = composeRule.onNodeWithTag("strip").captureToImage().asAndroidBitmap()
+            val x = ((a.left - root.left) + 3 * density).toInt()
+            val y = (a.top - root.top).toInt()
+            assertEquals(primary.toArgb(), pixels.getPixel(x, y + (density / 2).toInt()))
+            assertEquals(surface.toArgb(), pixels.getPixel(x, y + (3 * density).toInt()))
+            assertEquals(stripFill.toArgb(), pixels.getPixel(1, (pixels.height / 2)))
+        }
+    }
+
+    @Test
+    fun tabStripActionsAreIndependentAndAccessible() {
+        val events = mutableListOf<UiEvent>()
+        lateinit var inputMode: InputModeManager
+        composeRule.setContent {
+            inputMode = LocalInputModeManager.current
+            MyApplicationTheme {
+                UiNodeContent(parseUiNode(tabStripJson()), events::add, { _, _ -> }, false,
+                    modifier = Modifier.width(600.dp))
+            }
+        }
+        val selected = composeRule.onNodeWithText("Tab 1")
+        val inactive = composeRule.onNodeWithText("Tab 2")
+        val close = composeRule.onNodeWithContentDescription("Close Tab 2")
+        val add = composeRule.onNodeWithContentDescription("Add tab")
+        selected.assertIsSelected()
+        inactive.assertIsNotSelected().performTouchInput { click(center) }
+        inactive.assertIsNotSelected()
+        close.performTouchInput { click(center) }
+        add.performClick()
+        assertEquals(listOf("""["Select",2]""", """["Close",2]""", """["Create"]"""), events.map { it.json })
+        composeRule.runOnIdle { assertTrue(inputMode.requestInputMode(InputMode.Keyboard)) }
+        for (target in listOf(inactive, close, add)) {
+            target.performSemanticsAction(SemanticsActions.RequestFocus) { assertTrue(it()) }
+            target.performKeyInput { keyDown(Key.Enter); keyUp(Key.Enter) }
+            target.performKeyInput { keyDown(Key.Spacebar); keyUp(Key.Spacebar) }
+        }
+        assertEquals(listOf("""["Select",2]""", """["Select",2]""", """["Close",2]""", """["Close",2]""", """["Create"]""", """["Create"]"""), events.drop(3).map { it.json })
+        assertTrue(JSONObject(eventRequest(events.first(), null)).isNull("value"))
+        selected.performSemanticsAction(SemanticsActions.RequestFocus) { assertTrue(it()) }
+        selected.performKeyInput { keyDown(Key.Tab); keyUp(Key.Tab) }
+        composeRule.onNodeWithContentDescription("Close Tab 1").assertIsFocused()
+            .performKeyInput { keyDown(Key.Tab); keyUp(Key.Tab) }
+        inactive.assertIsFocused()
+    }
+
+    @Test
+    fun tabStripBlocksBusyAndCancelledActions() {
+        val events = mutableListOf<UiEvent>()
+        var busy by mutableStateOf(true)
+        composeRule.setContent {
+            MyApplicationTheme {
+                UiNodeContent(parseUiNode(tabStripJson(12)), events::add, { _, _ -> }, busy,
+                    modifier = Modifier.width(320.dp))
+            }
+        }
+        val targets = listOf(composeRule.onNodeWithText("Tab 1"),
+            composeRule.onNodeWithContentDescription("Close Tab 1"),
+            composeRule.onNodeWithContentDescription("Add tab"))
+        for (target in targets) target.assertIsNotEnabled().performTouchInput { click(center) }
+        composeRule.runOnIdle { busy = false }
+        for (target in targets) target.performTouchInput { down(center); cancel() }
+        composeRule.onNode(hasScrollAction()).performTouchInput { swipeLeft(durationMillis = 700) }
+        composeRule.runOnIdle { assertTrue(events.isEmpty()) }
+    }
+
+    @Test
+    fun tabStripRevealsSelectionWithoutResettingScroll() {
+        var json by mutableStateOf(tabStripJson(12))
+        val events = mutableListOf<UiEvent>()
+        composeRule.setContent {
+            MyApplicationTheme {
+                UiNodeContent(parseUiNode("""{"@type":"column","children":[$json,{"@type":"text","text":"Projects"}]}"""),
+                    events::add, { _, _ -> }, false, modifier = Modifier.width(320.dp))
+            }
+        }
+        val add = composeRule.onNodeWithContentDescription("Add tab")
+        val addBounds = add.fetchSemanticsNode().boundsInRoot
+        val contentBounds = composeRule.onNodeWithText("Projects").fetchSemanticsNode().boundsInRoot
+        composeRule.runOnIdle { json = tabStripJson(13, 13) }
+        composeRule.onNodeWithText("Tab 13").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Close Tab 13").assertIsDisplayed()
+        composeRule.runOnIdle { json = tabStripJson(12, 12) }
+        composeRule.onNodeWithText("Tab 12").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Close Tab 12").assertIsDisplayed()
+        composeRule.onNode(hasScrollAction()).performScrollToNode(hasText("Tab 1"))
+        val firstBounds = composeRule.onNodeWithText("Tab 1").fetchSemanticsNode().boundsInRoot
+        composeRule.runOnIdle { json = JSONObject(tabStripJson(12, 12)).put("addEvent", JSONArray("""["Create",2]""")).toString() }
+        assertEquals(firstBounds, composeRule.onNodeWithText("Tab 1").fetchSemanticsNode().boundsInRoot)
+        assertEquals(addBounds, add.fetchSemanticsNode().boundsInRoot)
+        assertEquals(contentBounds, composeRule.onNodeWithText("Projects").fetchSemanticsNode().boundsInRoot)
+        composeRule.runOnIdle { assertTrue(events.isEmpty()); json = tabStripJson(0) }
+        add.assertIsDisplayed().performClick()
+        assertEquals(listOf(UiEvent("""["Create"]""")), events)
+    }
+
+    @Test
+    fun parsesCardsAndCardTextRoles() {
+        val node = parseUiNode("""{"@type":"column","children":[
+            {"@type":"card","event":["Tab",7,2,["Select","s1"]],"children":[
+                {"@type":"text","text":"Project","style":"projectTitle"},
+                {"@type":"card","event":["Nested"],"children":[
+                    {"@type":"text","text":"Session","style":"sessionTitle"},
+                    {"@type":"text","text":"Path","style":"cardMeta"}]}]}]}""") as UiNode.Column
+        val card = node.children.single() as UiNode.Card
+        assertEquals(UiEvent("""["Tab",7,2,["Select","s1"]]"""), card.event)
+        assertEquals(UiNode.Text("Project", TextStyleRole.ProjectTitle), card.children.first())
+        val nested = card.children.last() as UiNode.Card
+        assertEquals(UiEvent("""["Nested"]"""), nested.event)
+        assertEquals(listOf(UiNode.Text("Session", TextStyleRole.SessionTitle),
+            UiNode.Text("Path", TextStyleRole.CardMeta)), nested.children)
+        assertEquals("""{"event":["Tab",7,2,["Select","s1"]],"value":null}""", eventRequest(card.event, null))
+    }
+
+    @Test
+    fun rejectsMalformedCards() {
+        val invalid = listOf(
+            """{"@type":"card","children":[]}""",
+            """{"@type":"card","event":[]}""",
+            """{"@type":"card","children":[null],"event":[]}""",
+            """{"@type":"card","children":[{"@type":"unknown"}],"event":[]}""",
+            """{"@type":"card","children":[{"@type":"text","text":"x","style":"ProjectTitle"}],"event":[]}""",
+        ) + listOf("null", "{}", "1", "true", "\"[]\"").flatMap { bad -> listOf(
+            """{"@type":"card","children":$bad,"event":[]}""",
+            """{"@type":"card","children":[],"event":$bad}""",
+        ) }
+        for (json in invalid) assertTrue("Accepted $json", runCatching { parseUiNode(json) }.isFailure)
+    }
+
+    @Test
+    fun cardsRenderThemedGeometryAndWrapText() {
+        var dark by mutableStateOf(false)
+        val project = "Очень длинное название проекта ".repeat(3)
+        val session = "Длинное название сессии ".repeat(3)
+        val metadata = "/projects/very-long-directory/".repeat(4)
+        val retry = "Status: retry: " + "Сервис временно недоступен, повторяем запрос. ".repeat(3)
+        val node = parseUiNode(JSONObject().put("@type", "card").put("event", JSONArray("[\"Select\"]"))
+            .put("children", JSONArray().apply {
+                for ((text, role) in listOf(project to "projectTitle", session to "sessionTitle", metadata to "cardMeta", retry to "cardMeta"))
+                    put(JSONObject().put("@type", "text").put("text", text).put("style", role))
+            }).toString())
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(1f, 1.25f)) {
+                MyApplicationTheme(darkTheme = dark) {
+                    Box(Modifier.width(240.dp).background(Color.Magenta).testTag("card-background")) {
+                        UiNodeContent(node, {}, { _, _ -> }, false, modifier = Modifier.testTag("card"))
+                    }
+                }
+            }
+        }
+        for (isDark in listOf(false, true)) {
+            composeRule.runOnIdle { dark = isDark }
+            val bounds = composeRule.onNodeWithTag("card").fetchSemanticsNode().boundsInRoot
+            assertEquals(240f, bounds.width, 1f)
+            var previousBottom: Float? = null
+            for ((text, size, lineHeight, weight) in listOf(
+                listOf(project, 17, 22, FontWeight.Medium),
+                listOf(session, 17, 22, FontWeight.SemiBold),
+                listOf(metadata, 12, 18, FontWeight.Normal),
+                listOf(retry, 12, 18, FontWeight.Normal),
+            )) {
+                val textNode = composeRule.onNodeWithText(text as String, useUnmergedTree = true)
+                val results = mutableListOf<TextLayoutResult>()
+                textNode.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(results) }
+                val result = results.single()
+                val style = result.layoutInput.style
+                assertEquals((size as Int).sp, style.fontSize)
+                assertEquals((lineHeight as Int).sp, style.lineHeight)
+                assertEquals(weight, style.fontWeight)
+                assertEquals(0.sp, style.letterSpacing)
+                val expectedColor = if (text == metadata || text == retry) {
+                    if (isDark) Color(0xFFC3C6D6) else Color(0xFF616C75)
+                } else if (isDark) Color(0xFFE0E3E8) else Color(0xFF232A30)
+                assertEquals(expectedColor, style.color)
+                assertTrue(result.lineCount > 1)
+                assertTrue(!result.hasVisualOverflow)
+                val childBounds = textNode.fetchSemanticsNode().boundsInRoot
+                assertEquals(12f, childBounds.left - bounds.left, 1f)
+                assertTrue(childBounds.right <= bounds.right - 11f)
+                assertEquals(previousBottom?.plus(2f) ?: (bounds.top + 12f), childBounds.top, 1f)
+                previousBottom = childBounds.bottom
+            }
+            assertEquals(12f, bounds.bottom - previousBottom!!, 1f)
+            val image = composeRule.onNodeWithTag("card-background").captureToImage().asAndroidBitmap()
+            val fill = (if (isDark) Color(0xFF181C20) else Color(0xFFF5F7FA)).toArgb()
+            assertEquals(fill, image.getPixel(120, 1))
+            assertEquals(fill, image.getPixel(1, image.height / 2))
+            assertEquals(Color.Magenta.toArgb(), image.getPixel(0, 0))
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            File(context.getExternalFilesDir(null), "card-wrapping-${if (isDark) "dark" else "light"}.png")
+                .outputStream().use { image.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }
+    }
+
+    @Test
+    fun cardsActivateOnceAcrossTheirSurfaceAndRespectRequestGuard() {
+        val node = parseUiNode("""{"@type":"card","event":["Tab",7,2,["Select","s1"]],"children":[
+            {"@type":"text","text":"Title","style":"sessionTitle"},
+            {"@type":"text","text":"Metadata","style":"cardMeta"}]}""")
+        var busy by mutableStateOf(false)
+        val requests = mutableListOf<String>()
+        lateinit var inputModeManager: InputModeManager
+        composeRule.setContent {
+            inputModeManager = LocalInputModeManager.current
+            MyApplicationTheme {
+                Box(Modifier.width(240.dp)) {
+                    UiNodeContent(node, { requests.add(eventRequest(it, null)) }, { _, _ -> }, busy,
+                        modifier = Modifier.testTag("card"))
+                }
+            }
+        }
+        val card = composeRule.onNodeWithTag("card")
+        composeRule.onAllNodes(hasClickAction()).assertCountEquals(1)
+        card.assertTextContains("Title").assertTextContains("Metadata").assertHeightIsAtLeast(48.dp)
+        for (text in listOf("Title", "Metadata")) {
+            composeRule.onNodeWithText(text, useUnmergedTree = true).performTouchInput { click(center) }
+            composeRule.runOnIdle { assertEquals("tap $text", if (text == "Title") 1 else 2, requests.size) }
+        }
+        card.performTouchInput { click(Offset(4f, height / 2f)) }
+        composeRule.runOnIdle { assertEquals("padding tap", 3, requests.size) }
+        card.performClick()
+        composeRule.runOnIdle { assertEquals("semantics click", 4, requests.size) }
+        composeRule.runOnIdle { assertTrue(inputModeManager.requestInputMode(InputMode.Keyboard)) }
+        card.performSemanticsAction(SemanticsActions.RequestFocus) { assertTrue("keyboard focus", it()) }
+        card.performKeyInput { keyDown(Key.Enter); keyUp(Key.Enter) }
+        composeRule.runOnIdle {
+            assertEquals(5, requests.size)
+            assertTrue(requests.all { it == """{"event":["Tab",7,2,["Select","s1"]],"value":null}""" })
+            busy = true
+        }
+        card.assertIsNotEnabled().performTouchInput { click(center) }
+        composeRule.runOnIdle { busy = false }
+        card.performTouchInput { down(center); cancel() }
+        composeRule.runOnIdle { assertEquals(5, requests.size) }
+    }
+
+    @Test
+    fun cardsScrollWithoutSelectionAndCreationControlScrollsWithThem() {
+        val cards = (1..20).joinToString(",") { """{"@type":"card","event":["Select",$it],"children":[
+            {"@type":"text","text":"Session $it","style":"sessionTitle"}]}""" }
+        val node = parseUiNode("""{"@type":"column","stretch":true,"weights":[0,1],"children":[
+            {"@type":"text","text":"Sessions"},
+            {"@type":"column","stretch":true,"gap":{"size":8},"children":[
+                {"@type":"button","label":"Create","event":["Create"]},$cards]}]}""")
+        val events = mutableListOf<UiEvent>()
+        composeRule.setContent {
+            MyApplicationTheme {
+                Box(Modifier.width(240.dp).height(240.dp)) {
+                    UiNodeContent(node, { events.add(it) }, { _, _ -> }, false)
+                }
+            }
+        }
+        val heading = composeRule.onNodeWithText("Sessions").fetchSemanticsNode().boundsInRoot
+        val scroll = composeRule.onNode(hasScrollAction())
+        scroll.performTouchInput { swipeUp() }
+        scroll.performScrollToNode(hasText("Session 20"))
+        composeRule.onNodeWithText("Session 20").assertIsDisplayed()
+        assertEquals(heading, composeRule.onNodeWithText("Sessions").fetchSemanticsNode().boundsInRoot)
+        composeRule.runOnIdle { assertTrue(events.isEmpty()) }
+        scroll.performScrollToNode(hasText("Create"))
+        composeRule.onNodeWithText("Create").assertIsDisplayed()
+    }
 
     @Test
     fun retainsTextStylesAndDefaultsLegacyText() {

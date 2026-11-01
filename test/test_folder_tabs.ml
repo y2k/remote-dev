@@ -13,9 +13,27 @@ let rec find key value = function
 let has_text value document = Option.is_some (find "text" value document)
 
 let event label document =
-  match find "label" label document with
-  | Some node -> J.Util.member "event" node
-  | None -> failwith ("Missing control: " ^ label)
+  if label = "+" then
+    match find "@type" "tab_strip" document with
+    | Some strip -> J.Util.member "addEvent" strip
+    | None -> failwith "Missing tab strip"
+  else
+    let rec control = function
+      | `Assoc fields as node ->
+          if
+            List.assoc_opt "label" fields = Some (`String label)
+            || List.assoc_opt "@type" fields = Some (`String "card")
+               && has_text label node
+          then Some node
+          else List.find_map (fun (_, child) -> control child) fields
+      | `List children -> List.find_map control children
+      | _ -> None
+    in
+    match control document with
+    | Some node ->
+        let select = J.Util.member "selectEvent" node in
+        if select = `Null then J.Util.member "event" node else select
+    | None -> failwith ("Missing control: " ^ label)
 
 let request ?(value = `Null) event =
   J.to_string (`Assoc [ ("event", event); ("value", value) ])

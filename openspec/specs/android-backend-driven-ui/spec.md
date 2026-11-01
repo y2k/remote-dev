@@ -166,10 +166,10 @@ The Android client SHALL expose a loading state while any backend-defined event 
 - **THEN** the client displays an error while keeping pull-to-refresh and the `Refresh` menu item available
 
 ### Requirement: Reject unsupported documents
-The Android client SHALL treat missing required fields, invalid field types, a `column` or `row` whose `weights` is not an array of one non-negative finite number per child, and node types other than `column`, `row`, `text`, `button`, `input`, `image`, or `voice_input` as parse failures.
+The Android client SHALL treat missing required fields, invalid field types, a `column` or `row` whose `weights` is not an array of one non-negative finite number per child, and node types other than `column`, `row`, `text`, `button`, `input`, `image`, `voice_input`, `card`, or `tab_strip` as parse failures.
 
 #### Scenario: Unsupported node type
-- **WHEN** the document contains a node whose `@type` is not `column`, `row`, `text`, `button`, `input`, `image`, or `voice_input`
+- **WHEN** the document contains a node whose `@type` is not `column`, `row`, `text`, `button`, `input`, `image`, `voice_input`, `card`, or `tab_strip`
 - **THEN** the client displays an error instead of partially rendering the document
 
 #### Scenario: Invalid text content
@@ -702,3 +702,122 @@ The Claude worktree shortcut buttons SHALL be arranged vertically with each butt
 - **WHEN** the emulator panel is rendered with available devices
 - **THEN** Refresh and each device-selection button appear in their existing horizontal row and order
 - **AND** selection and refresh use their unchanged backend events
+
+### Requirement: Interactive card wire format
+The client SHALL accept a `card` node with required `children` and `event` arrays. Children SHALL be recursively parsed supported UI nodes; event SHALL remain opaque backend-defined JSON. Missing or wrongly typed fields, including null, SHALL reject the whole document. Cards SHALL be accepted wherever a supported child node is accepted.
+
+#### Scenario: Parse a card
+- **WHEN** a document contains `{"@type":"card","event":["Select","s1"],"children":[{"@type":"text","text":"Session","style":"sessionTitle"}]}`
+- **THEN** the client retains the event and renders the card with its text child
+
+#### Scenario: Reject malformed cards
+- **WHEN** a card omits children or event, either field is not an array, or a child is invalid
+- **THEN** the entire document fails parsing rather than rendering partially
+
+### Requirement: Shared card appearance
+Cards SHALL use the active theme's `surfaceContainerLow`, 12 dp corners, 12 dp internal padding on every side, no border, and a subtle 1 dp shadow. Children SHALL appear vertically with 2 dp gaps. Cards SHALL fill their allocated width, have at least 48 dp height, and grow to fit wrapped content. Card-specific colors SHALL take precedence over generic graphite control-surface colors.
+
+#### Scenario: Light and dark cards
+- **WHEN** the same card is displayed in light and dark appearance
+- **THEN** its fill resolves to the current theme's `surfaceContainerLow` (`#F5F7FA` light and `#181C20` dark in the current palette)
+- **AND** geometry remains unchanged with no border or first-card accent
+
+#### Scenario: Narrow card with scaled text
+- **WHEN** card content wraps within a narrow allocation at 125% font scale
+- **THEN** the card grows in height while retaining padding and its allocated width
+
+### Requirement: Card activation
+A card SHALL expose one accessible click action and standard Android ripple clipped to its rounded shape. A completed click anywhere inside its visible bounds SHALL submit exactly one event with the unchanged event array and null value. While an event request is in progress, activation SHALL be disabled and SHALL NOT send or queue requests. Cancelled gestures and scrolling drags SHALL NOT activate a card.
+
+#### Scenario: Activate padding
+- **WHEN** no request is in progress and a completed tap lands inside card padding
+- **THEN** one request carries that card's event and a null value
+
+#### Scenario: Prevent accidental activation
+- **WHEN** a user scrolls from a card, cancels a gesture, or taps while an event is in progress
+- **THEN** no card event is sent or queued
+
+#### Scenario: Accessible activation
+- **WHEN** the card is focused through accessibility or keyboard navigation
+- **THEN** its text identifies one actionable card and activating it uses the same event as touch
+
+### Requirement: Card text roles
+Text nodes SHALL additionally accept `projectTitle`, `sessionTitle`, and `cardMeta` style values. Titles SHALL use system typography at 17 sp with 22 sp line height, weight 500 and 600 respectively, and `onSurface`. Metadata SHALL use 12/18 sp, weight 400, and `onSurfaceVariant`. All three SHALL use zero letter spacing and wrap without truncation. Existing styles and the omitted-style body default SHALL retain their behavior.
+
+#### Scenario: Render card typography
+- **WHEN** text specifies any of the three card roles
+- **THEN** its size, line height, weight, and foreground follow that role in both themes using the system font without downloads
+
+#### Scenario: Preserve older text documents
+- **WHEN** text omits style or uses body, heading, caption, or code
+- **THEN** its rendering retains its existing typography and foreground behavior
+
+#### Scenario: Reject invalid style
+- **WHEN** text style is null, a non-string, differently cased, or unknown
+- **THEN** the whole document fails parsing
+
+### Requirement: Backend card event composition
+The backend SHALL serialize cards with their ordered children and event arrays. Mapping component events SHALL transform card events and recursively map descendant events while preserving text roles and child order. Existing nodes SHALL retain their serialized representation.
+
+#### Scenario: Map a card into a tab
+- **WHEN** a component card event is wrapped with tab identity and generation
+- **THEN** the serialized card contains the wrapped event and unchanged ordered text content and roles
+
+### Requirement: Semantic tab strip wire format
+The client SHALL accept a `tab_strip` node wherever supported child nodes are accepted. It SHALL require a `tabs` array and an opaque `addEvent` array. Every tab SHALL require a unique nonempty string `id`, string `label`, boolean `selected`, and opaque arrays `selectEvent` and `closeEvent`. Empty strips SHALL have no selection; nonempty strips SHALL have exactly one selected tab.
+
+#### Scenario: Parse a populated strip
+- **WHEN** a strip contains two valid tab records with one selected
+- **THEN** order, identities, labels, selected state and all event arrays are retained
+
+#### Scenario: Parse an empty strip
+- **WHEN** a strip has `tabs: []` and a valid `addEvent`
+- **THEN** it renders only the add action
+
+#### Scenario: Reject malformed strip
+- **WHEN** a required field is missing, null, or wrongly typed, a tab is not an object, an identity is empty or duplicated, or a nonempty strip has zero or multiple selections
+- **THEN** the entire document fails parsing without partial rendering or coercion
+
+### Requirement: Backend tab strip event mapping
+The backend SHALL serialize tab strips with their ordered records and required fields. Component event mapping SHALL transform addition, selection, and closing events while retaining identities, labels, selection and order. Existing nodes SHALL retain their representation.
+
+#### Scenario: Map strip into application events
+- **WHEN** a strip is mapped into the enclosing application's message type
+- **THEN** all three kinds of event receive that wrapper and the displayed state is unchanged
+
+### Requirement: Tab strip theme and typography
+The strip SHALL use `surfaceContainerLow` and a 1 dp `outlineVariant` bottom divider. The selected tab SHALL use `surface`, a 2 dp top line and label in `primary`; inactive labels and icons SHALL use `onSurfaceVariant` on a transparent tab background. Labels SHALL use system typography at 14/21 sp, weight 500, zero letter spacing. These roles SHALL resolve through the current light or dark theme.
+
+#### Scenario: Switch theme
+- **WHEN** the same strip is rendered in light and dark appearance
+- **THEN** its geometry stays unchanged and its fills, divider, indicator and text resolve to the active theme roles
+- **AND** the selected tab has no textual star marker, bottom accent underline, or surrounding accent border
+
+### Requirement: Tab strip geometry and icons
+Selection, closing and addition SHALL have separate, nonoverlapping targets at least 48 dp wide and high. Labels SHALL remain single-line without truncation; overflowing tabs SHALL scroll horizontally. Strip height SHALL grow for scaled text. Close and add SHALL be vector icons of 16 dp and 20 dp respectively. The strip SHALL stay within its allocated pane with addition pinned at the right outside scrolling.
+
+#### Scenario: Scale text
+- **WHEN** font scale is 1.25 or 2.0
+- **THEN** labels are readable without vertical clipping, all targets retain their minimum size, and overflow remains horizontal
+
+#### Scenario: Scroll overflowing tabs
+- **WHEN** tabs exceed the available width and the user drags the strip
+- **THEN** tabs move without selecting or closing, while the add action and page content remain stationary
+
+### Requirement: Accessible tab actions
+The strip SHALL expose a selectable group with labelled tab selection targets and selected state. Close buttons SHALL be described as `Close <label>` and addition as `Add tab`. Standard focus traversal and Enter/Space activation SHALL be available. Native ripple and focus indication SHALL identify the specific action without merging selection and closing into a single action.
+
+#### Scenario: Activate with keyboard or accessibility
+- **WHEN** a selection, close, or add target receives standard keyboard or accessibility activation
+- **THEN** it performs the same single action as touch and assistive technology can distinguish selection from closing
+
+### Requirement: Tab action request serialization
+An available tab action SHALL submit exactly one request with its unchanged event array and null value. While any UI event request is in progress, select, close and add SHALL be disabled and SHALL NOT send or queue events. Cancelled gestures and scrolling SHALL NOT activate an action. Selection SHALL follow the next backend document rather than change optimistically.
+
+#### Scenario: Close target is independent
+- **WHEN** a completed tap lands on the close target
+- **THEN** exactly the close event is sent, without also sending selection
+
+#### Scenario: Disabled and cancelled actions
+- **WHEN** an action is attempted during a request, or a gesture is cancelled or becomes a scroll
+- **THEN** no event is sent or queued

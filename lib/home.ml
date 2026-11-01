@@ -43,7 +43,7 @@ let view environment { screen; emulator } =
   row ~weights:[ 2; 1 ]
     ~gap:(Gap.make ~color:Outline_variant 1)
     [
-      column
+      column ~padding:(Padding.only ~end_:8 ())
         [
           text ~style:Caption
             (match environment with

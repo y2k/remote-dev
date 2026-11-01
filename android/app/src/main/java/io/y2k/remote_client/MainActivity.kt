@@ -77,6 +77,9 @@ enum class TextStyleRole(val wireName: String) {
     Heading("heading"),
     Caption("caption"),
     Code("code"),
+    ProjectTitle("projectTitle"),
+    SessionTitle("sessionTitle"),
+    CardMeta("cardMeta"),
 }
 
 data class UiPadding(val start: Int = 0, val top: Int = 0, val end: Int = 0, val bottom: Int = 0)
@@ -85,7 +88,18 @@ data class UiGap(val size: Int = 4, val color: ThemeColor? = null)
 
 data class UiBorder(val width: Int, val color: ThemeColor)
 
+data class UiTab(
+    val id: String,
+    val label: String,
+    val selected: Boolean,
+    val selectEvent: UiEvent,
+    val closeEvent: UiEvent,
+)
+
 sealed interface UiNode {
+    data class TabStrip(val tabs: List<UiTab>, val addEvent: UiEvent) : UiNode
+    data class Card(val children: List<UiNode>, val event: UiEvent) : UiNode
+
     data class Column(
         val children: List<UiNode>,
         val weights: List<Float>? = null,
@@ -153,8 +167,28 @@ private fun JSONObject.themeColor(key: String): ThemeColor? =
 private fun parseUiNode(node: JSONObject): UiNode {
     val type = node.get("@type") as? String ?: throw IllegalArgumentException("Missing @type")
     return when (type) {
+        "tab_strip" -> {
+            val values = node.get("tabs") as? JSONArray
+                ?: throw IllegalArgumentException("tabs must be an array")
+            val tabs = List(values.length()) { index ->
+                val tab = values.get(index) as? JSONObject
+                    ?: throw IllegalArgumentException("tab must be an object")
+                val id = tab.get("id") as? String
+                    ?: throw IllegalArgumentException("tab id must be a string")
+                require(id.isNotEmpty()) { "tab id must not be empty" }
+                UiTab(id,
+                    tab.get("label") as? String ?: throw IllegalArgumentException("tab label must be a string"),
+                    tab.get("selected") as? Boolean ?: throw IllegalArgumentException("tab selected must be a boolean"),
+                    parseEvent(tab, "Tab selection", "selectEvent"),
+                    parseEvent(tab, "Tab closing", "closeEvent"))
+            }
+            require(tabs.map { it.id }.distinct().size == tabs.size) { "tab ids must be unique" }
+            require(tabs.isEmpty() || tabs.count { it.selected } == 1) { "exactly one tab must be selected" }
+            UiNode.TabStrip(tabs, parseEvent(node, "Tab addition", "addEvent"))
+        }
         "column",
-        "row" -> {
+        "row",
+        "card" -> {
             val children =
                 node.get("children") as? JSONArray
                     ?: throw IllegalArgumentException("$type children must be an array")
@@ -165,6 +199,7 @@ private fun parseUiNode(node: JSONObject): UiNode {
                             ?: throw IllegalArgumentException("$type child must be an object")
                     parseUiNode(child)
                 }
+            if (type == "card") return UiNode.Card(parsedChildren, parseEvent(node, "Card"))
             val weights =
                 if (node.has("weights")) {
                     val values =
@@ -277,9 +312,9 @@ private fun parseUiNode(node: JSONObject): UiNode {
     }
 }
 
-private fun parseEvent(node: JSONObject, nodeName: String): UiEvent {
+private fun parseEvent(node: JSONObject, nodeName: String, field: String = "event"): UiEvent {
     val value =
-        node.get("event") as? JSONArray
+        node.get(field) as? JSONArray
             ?: throw IllegalArgumentException("$nodeName event must be an array")
     return UiEvent(value.toString())
 }

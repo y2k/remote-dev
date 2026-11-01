@@ -17,7 +17,10 @@ module Directories = struct
       | [], None -> [ text "No subdirectories" ]
       | entries, _ ->
           List.map
-            (fun name -> button ~event:(Click (Filename.concat root name)) name)
+            (fun name ->
+              card
+                ~event:(Click (Filename.concat root name))
+                [ text ~style:Project_title name ])
             entries
     in
     column ~stretch:true ~weights:[ 0; 0; 0; 1 ]
@@ -25,7 +28,7 @@ module Directories = struct
         text ~style:Heading "Directories";
         text ~style:Code root;
         column errors;
-        column ~stretch:true entries;
+        column ~stretch:true ~gap:(Gap.make 8) entries;
       ]
 
   let load root : msg Cmd.t =
@@ -316,16 +319,11 @@ module Sessions = struct
       | sessions ->
           List.map
             (fun (session : Runtime.opencode_session) ->
-              column ~stretch:true ~background:Surface
-                ~border:(Border.make ~color:Outline_variant 1)
-                ~corner_radius:12 ~padding:(Padding.all 16) ~gap:(Gap.make 8)
+              card ~event:(Select session.id)
                 [
-                  row ~weights:[ 1; 0 ] ~gap:(Gap.make 12)
-                    [
-                      button ~event:(Select session.id) session.title;
-                      text ~style:Caption ("Status: " ^ status session.status);
-                    ];
-                  text ~style:Code session.directory;
+                  text ~style:Session_title session.title;
+                  text ~style:Card_meta session.directory;
+                  text ~style:Card_meta ("Status: " ^ status session.status);
                 ])
             sessions
     in
@@ -338,7 +336,7 @@ module Sessions = struct
           (match directory with
           | None -> []
           | Some path -> [ text ~style:Code path ]);
-        column ~stretch:true ~gap:(Gap.make 12)
+        column ~stretch:true ~gap:(Gap.make 8)
           ((match directory with
              | None -> []
              | Some _ ->
@@ -602,20 +600,16 @@ module Project_tabs = struct
     let tabs =
       List.map
         (fun id ->
-          let active = model.active = Some id in
-          let label = Printf.sprintf "Tab %d" id in
-          row
-            ~background:(if active then Primary_container else Surface)
-            [
-              button ~event:(Select id) (if active then "* " ^ label else label);
-              button ~event:(Close id) "X";
-            ])
+          {
+            id = string_of_int id;
+            label = Printf.sprintf "Tab %d" id;
+            selected = model.active = Some id;
+            select_event = Select id;
+            close_event = Close id;
+          })
         model.tabs
     in
-    let strip =
-      row ~weights:[ 1; 0 ]
-        [ row ~horizontal_scroll:true tabs; button ~event:Create "+" ]
-    in
+    let strip = tab_strip ~add_event:Create tabs in
     let content =
       match model.active with
       | None -> []
