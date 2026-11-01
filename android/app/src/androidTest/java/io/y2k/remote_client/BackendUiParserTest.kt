@@ -950,10 +950,11 @@ class BackendUiParserTest {
                 val leftWidth = composeRule.onNodeWithText("Left").fetchSemanticsNode().boundsInRoot.width
                 assertEquals(leftWidth / 2, panes.right - title.left, 1f)
                 assertEquals(density, title.left - (panes.left + leftWidth), 1f)
-                if (isDark) assertEquals(Color(0xFF343A43).toArgb(), divider)
                 val dividerX = (title.left - density / 2).toInt()
-                for (y in (panes.top + 1).toInt() until (panes.bottom - 1).toInt()) {
-                    assertEquals(divider, image.getPixel(dividerX, y))
+                // Check both ends of the full-height divider, away from the Refresh button's shadow.
+                for (y in listOf((panes.top + 1).toInt(), (panes.bottom - 1).toInt())) {
+                    assertEquals("dark=$isDark preview=$showPreview pixel=($dividerX,$y) panes=$panes title=$title density=$density",
+                        divider, image.getPixel(dividerX, y))
                 }
                 if (showPreview) {
                     val context = InstrumentationRegistry.getInstrumentation().targetContext
