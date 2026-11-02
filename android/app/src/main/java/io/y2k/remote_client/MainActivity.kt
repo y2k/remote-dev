@@ -67,6 +67,7 @@ enum class ThemeColor(val wireName: String) {
     Background("background"),
     Surface("surface"),
     SurfaceContainer("surfaceContainer"),
+    SurfaceContainerLow("surfaceContainerLow"),
     Primary("primary"),
     PrimaryContainer("primaryContainer"),
     OutlineVariant("outlineVariant"),
@@ -87,6 +88,9 @@ data class UiPadding(val start: Int = 0, val top: Int = 0, val end: Int = 0, val
 data class UiGap(val size: Int = 4, val color: ThemeColor? = null)
 
 data class UiBorder(val width: Int, val color: ThemeColor)
+
+enum class ButtonStyle(val wireName: String) { Compact("compact"), Icon("icon") }
+enum class ButtonIcon(val wireName: String) { Refresh("refresh") }
 
 data class UiTab(
     val id: String,
@@ -127,6 +131,9 @@ sealed interface UiNode {
     data class Button(
         val label: String,
         val event: UiEvent? = null,
+        val style: ButtonStyle? = null,
+        val selected: Boolean? = null,
+        val icon: ButtonIcon? = null,
     ) : UiNode
 
     // ponytail: an input submits only its own value; add form data when an event needs multiple
@@ -264,6 +271,16 @@ private fun parseUiNode(node: JSONObject): UiNode {
                         ?: throw IllegalArgumentException("style must be a supported text role"),
             )
         "button" -> {
+            val style = if (!node.has("style")) null else
+                ButtonStyle.entries.firstOrNull { it.wireName == node.opt("style") }
+                    ?: throw IllegalArgumentException("Unsupported button style")
+            val selected = if (!node.has("selected")) null else
+                node.get("selected") as? Boolean ?: throw IllegalArgumentException("selected must be a boolean")
+            val icon = if (!node.has("icon")) null else
+                ButtonIcon.entries.firstOrNull { it.wireName == node.opt("icon") }
+                    ?: throw IllegalArgumentException("Unsupported button icon")
+            require(selected == null || style == ButtonStyle.Compact) { "selected requires compact style" }
+            require((style == ButtonStyle.Icon) == (icon != null)) { "icon is required only for icon style" }
             val event =
                 if (node.has("event")) {
                     parseEvent(node, "Button")
@@ -274,6 +291,7 @@ private fun parseUiNode(node: JSONObject): UiNode {
                 node.get("label") as? String
                     ?: throw IllegalArgumentException("Button label must be a string"),
                 event,
+                style, selected, icon,
             )
         }
         "input" ->

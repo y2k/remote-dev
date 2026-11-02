@@ -3,6 +3,19 @@ package io.y2k.remote_client
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
@@ -81,6 +94,7 @@ private fun themeColor(role: ThemeColor?): Color {
         ThemeColor.Background -> colors.background
         ThemeColor.Surface -> colors.surface
         ThemeColor.SurfaceContainer -> colors.surfaceContainer
+        ThemeColor.SurfaceContainerLow -> colors.surfaceContainerLow
         ThemeColor.Primary -> colors.primary
         ThemeColor.PrimaryContainer -> colors.primaryContainer
         ThemeColor.OutlineVariant -> colors.outlineVariant
@@ -218,6 +232,7 @@ fun UiNodeContent(
             Row(
                 modifier = (if (node.weights == null) modifier else modifier.fillMaxWidth())
                     .then(if (node.horizontalScroll) Modifier.horizontalScroll(rememberScrollState()) else Modifier)
+                    .then(if (node.children.any { it is UiNode.Button && it.selected != null }) Modifier.selectableGroup() else Modifier)
                     .containerDecoration(node.background, node.border, node.cornerRadius).padding(
                         node.padding.start.dp, node.padding.top.dp, node.padding.end.dp, node.padding.bottom.dp,
                     ).then(gaps?.modifier(themeColor(node.gap.color)) ?: Modifier),
@@ -269,8 +284,38 @@ fun UiNodeContent(
                     else MaterialTheme.colorScheme.onSurface,
                 text = node.text,
             )
-        is UiNode.Button ->
-            Button(
+        is UiNode.Button -> when (node.style) {
+            ButtonStyle.Compact -> {
+                val colors = MaterialTheme.colorScheme
+                val shape = RoundedCornerShape(8.dp)
+                val selected = node.selected == true
+                val action = { node.event?.let(onButtonEvent); Unit }
+                Box(
+                    modifier.clip(shape)
+                        .background(if (selected) colors.surfaceContainerHigh else colors.surfaceContainer)
+                        .border(1.dp, colors.outlineVariant, shape)
+                        .then(if (node.selected != null)
+                            Modifier.selectable(node.selected, enabled = !eventInProgress, role = Role.RadioButton, onClick = action)
+                            else Modifier.clickable(enabled = !eventInProgress, role = Role.Button, onClick = action))
+                        .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(node.label, modifier = Modifier.width(IntrinsicSize.Max), maxLines = 1,
+                        style = TextStyle(fontFamily = FontFamily.Default, fontSize = 12.sp,
+                            lineHeight = 18.sp, letterSpacing = 0.sp,
+                            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal),
+                        color = if (selected) colors.onSurface else colors.onSurfaceVariant)
+                }
+            }
+            ButtonStyle.Icon -> IconButton(
+                onClick = { node.event?.let(onButtonEvent) }, enabled = !eventInProgress,
+                modifier = modifier.size(48.dp).clip(RoundedCornerShape(8.dp)),
+            ) {
+                Icon(painterResource(when (requireNotNull(node.icon)) { ButtonIcon.Refresh -> R.drawable.ic_refresh }),
+                    node.label, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            null -> Button(
                 modifier = modifier,
                 enabled = !eventInProgress,
                 onClick = { node.event?.let(onButtonEvent) },
@@ -283,6 +328,7 @@ fun UiNodeContent(
                     style = MaterialTheme.typography.labelLarge,
                 )
             }
+        }
         is UiNode.Input -> {
             var value by remember(node, LocalUiDocument.current) { mutableStateOf(node.text) }
             TextField(

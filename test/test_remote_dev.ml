@@ -311,6 +311,31 @@ let () =
         {|{"@type":"column","children":[{"@type":"tab_strip","tabs":[{"id":"1","label":"Tab 1","selected":false,"selectEvent":["Wrapped","select1"],"closeEvent":["Wrapped","close1"]},{"id":"2","label":"Tab 2","selected":true,"selectEvent":["Wrapped","select2"],"closeEvent":["Wrapped","close2"]}],"addEvent":["Wrapped","add"]}]}|})
 
 let () =
+  let open Remote_dev.Components in
+  let encode node =
+    node
+    |> map (fun event -> `List [ `String "Root"; `String event ])
+    |> to_json Fun.id
+  in
+  assert (
+    encode (button ~event:"refresh" ~style:Icon ~icon:Refresh_icon "Reload")
+    = J.from_string
+        {|{"@type":"button","label":"Reload","event":["Root","refresh"],"style":"icon","icon":"refresh"}|});
+  assert (
+    encode (button ~event:"pixel" ~style:Compact ~selected:false "Pixel")
+    = J.from_string
+        {|{"@type":"button","label":"Pixel","event":["Root","pixel"],"style":"compact","selected":false}|});
+  assert (
+    encode
+      (column
+         [
+           button ~event:"tablet" ~style:Compact ~selected:true "Tablet";
+           button "Ordinary";
+         ])
+    = J.from_string
+        {|{"@type":"column","children":[{"@type":"button","label":"Tablet","event":["Root","tablet"],"style":"compact","selected":true},{"@type":"button","label":"Ordinary"}]}|})
+
+let () =
   let module Tabs = Home_components.Project_tabs in
   let initial, cmd = Tabs.init "/missing-project-root" in
   assert (initial.tabs = [] && initial.active = None && Cmd.run cmd = None);
@@ -498,6 +523,16 @@ let () =
         || List.exists (fun (_, value) -> has_text text value) fields
     | `List values -> List.exists (has_text text) values
     | _ -> false
+  in
+  let rec find_header = function
+    | `Assoc fields as node ->
+        if
+          List.assoc_opt "background" fields
+          = Some (`String "surfaceContainerLow")
+        then Some node
+        else List.find_map (fun (_, value) -> find_header value) fields
+    | `List nodes -> List.find_map find_header nodes
+    | _ -> None
   in
   let rec find_weighted_column weights = function
     | `Assoc fields ->
@@ -998,7 +1033,8 @@ let () =
     | Some (left, right) ->
         assert (has_text left_text left);
         assert (not (has_text "Emulators" left));
-        assert (has_text "Emulators" right);
+        assert (not (has_text "Emulators" right));
+        assert (find_header left = None && Option.is_some (find_header right));
         let fields =
           match right with `Assoc fields -> fields | _ -> assert false
         in
@@ -2516,6 +2552,44 @@ let () =
   in
   let unselected = { emulator with selected_emulator = None } in
   let missing = { emulator with emulators = [ List.nth emulators 1 ] } in
+  let header_devices model =
+    emulator_view model |> find_header |> Option.get |> J.Util.member "children"
+    |> J.Util.to_list |> List.hd |> J.Util.member "children" |> J.Util.to_list
+    |> List.map (fun d ->
+        ( J.Util.member "event" d |> J.Util.to_list |> List.tl |> List.hd,
+          J.Util.member "label" d,
+          J.Util.member "selected" d ))
+  in
+  let pixel selected =
+    (`String "emulator-5554", `String "Pixel", `Bool selected)
+  in
+  let other selected =
+    (`String "emulator-5556", `String "Test", `Bool selected)
+  in
+  List.iter
+    (fun (model, expected) -> assert (header_devices model = expected))
+    [
+      (initial_emulator, []);
+      (unselected, [ pixel false; other false ]);
+      ({ unselected with emulators = [ List.hd emulators ] }, [ pixel false ]);
+      (emulator, [ pixel true; other false ]);
+      (missing, [ other false ]);
+      (empty, []);
+      (failed, [ pixel true; other false ]);
+      (retried, [ pixel true ]);
+    ];
+  let renamed_state, _ =
+    Home_components.Emulator.update selected
+      (Home_components.Emulator.Loaded (Ok [ renamed; List.hd emulators ]))
+  in
+  assert (
+    header_devices renamed_state
+    = [ (`String "emulator-5556", `String "Renamed", `Bool true); pixel false ]);
+  let returned, _ =
+    Home_components.Emulator.update empty
+      (Home_components.Emulator.Loaded (Ok emulators))
+  in
+  assert (header_devices returned = [ pixel true; other false ]);
   List.iter
     (fun (model, message, image) ->
       let document = emulator_view model in

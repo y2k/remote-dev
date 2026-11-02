@@ -2,6 +2,7 @@ type theme_color =
   | Background
   | Surface
   | Surface_container
+  | Surface_container_low
   | Primary
   | Primary_container
   | Outline_variant
@@ -49,6 +50,9 @@ type text_style =
   | Session_title
   | Card_meta
 
+type button_style = Compact | Icon
+type button_icon = Refresh_icon
+
 type 'event tab = {
   id : string;
   label : string;
@@ -60,7 +64,12 @@ type 'event tab = {
 type 'event t =
   | Tab_strip of 'event tab list * 'event
   | Card of 'event * 'event t list
-  | Button of string * 'event option
+  | Button of
+      string
+      * 'event option
+      * button_style option
+      * bool option
+      * button_icon option
   | Column of
       bool
       * int list option
@@ -95,7 +104,13 @@ module Cmd = struct
     | Run cmd -> Run (fun () -> Option.map f (cmd ()))
 end
 
-let button ?event title = Button (title, event)
+let button ?event ?style ?selected ?icon title =
+  if Option.is_some selected && style <> Some Compact then
+    invalid_arg "selected requires compact style";
+  if style = Some Icon <> Option.is_some icon then
+    invalid_arg "icon is required only for icon style";
+  Button (title, event, style, selected, icon)
+
 let card ~event children = Card (event, children)
 let tab_strip ~add_event tabs = Tab_strip (tabs, add_event)
 
@@ -143,7 +158,8 @@ let rec map f = function
             tabs,
           f add_event )
   | Card (event, children) -> Card (f event, List.map (map f) children)
-  | Button (title, event) -> Button (title, Option.map f event)
+  | Button (title, event, style, selected, icon) ->
+      Button (title, Option.map f event, style, selected, icon)
   | Column
       ( stretch,
         weights,
@@ -193,6 +209,7 @@ let color_fields key = function
         | Background -> "background"
         | Surface -> "surface"
         | Surface_container -> "surfaceContainer"
+        | Surface_container_low -> "surfaceContainerLow"
         | Primary -> "primary"
         | Primary_container -> "primaryContainer"
         | Outline_variant -> "outlineVariant"
@@ -265,12 +282,28 @@ let rec to_json event = function
         ]
   | Voice_input action ->
       `Assoc [ ("@type", `String "voice_input"); ("event", event action) ]
-  | Button (label, action) ->
+  | Button (label, action, style, selected, icon) ->
       let fields = [ ("@type", `String "button"); ("label", `String label) ] in
       `Assoc
-        (match action with
-        | Some action -> fields @ [ ("event", event action) ]
-        | None -> fields)
+        (fields
+        @ (match action with
+          | Some action -> [ ("event", event action) ]
+          | None -> [])
+        @ (match style with
+          | None -> []
+          | Some style ->
+              [
+                ( "style",
+                  `String
+                    (match style with Compact -> "compact" | Icon -> "icon") );
+              ])
+        @ (match selected with
+          | None -> []
+          | Some value -> [ ("selected", `Bool value) ])
+        @
+        match icon with
+        | None -> []
+        | Some Refresh_icon -> [ ("icon", `String "refresh") ])
   | Column
       ( stretch,
         weights,

@@ -84,6 +84,226 @@ import org.junit.runner.RunWith
 class BackendUiParserTest {
     @get:Rule val composeRule = createComposeRule()
 
+    private fun emulatorHeaderJson(count: Int = 2, selected: Int = 1,
+        refresh: String = """["Refresh"]""", lastLabel: String? = null): String {
+        val devices = (1..count).joinToString(",") {
+            val label = JSONObject.quote(if (it == count && lastLabel != null) lastLabel else "Device $it")
+            """{"@type":"button","label":$label,"style":"compact","selected":${it == selected},"event":["Select","emulator-$it"]}"""
+        }
+        return """{"@type":"column","stretch":true,"gap":{"size":0},"children":[
+            {"@type":"row","background":"surfaceContainerLow","padding":{"start":12,"end":12,"top":4,"bottom":4},"gap":{"size":8},"weights":[1,0],"children":[
+                {"@type":"row","horizontalScroll":true,"gap":{"size":4},"children":[$devices]},
+                {"@type":"button","style":"icon","icon":"refresh","label":"Обновить список эмуляторов","event":$refresh}]},
+            {"@type":"row","background":"outlineVariant","padding":{"start":0,"end":0,"top":0,"bottom":1},"children":[]}] }"""
+    }
+
+    @Test
+    fun parsesButtonPresentationStrictly() {
+        val compact = """{"@type":"button","label":"Option","style":"compact","selected":false,"event":["Arbitrary",7]}"""
+        val icon = """{"@type":"button","label":"Reload data","style":"icon","icon":"refresh","event":["Other"]}"""
+        assertEquals(UiNode.Button("Option", UiEvent("""["Arbitrary",7]"""), ButtonStyle.Compact, false), parseUiNode(compact))
+        assertEquals(UiNode.Button("Reload data", UiEvent("""["Other"]"""), ButtonStyle.Icon, icon = ButtonIcon.Refresh), parseUiNode(icon))
+        assertEquals(UiNode.Button("Old"), parseUiNode("""{"@type":"button","label":"Old"}"""))
+        assertEquals(null, (parseUiNode(JSONObject(compact).apply { remove("selected") }.toString()) as UiNode.Button).selected)
+        for (count in listOf(0, 1, 12)) parseUiNode(emulatorHeaderJson(count, selected = 0))
+        fun reject(node: JSONObject) {
+            assertTrue("Accepted $node", runCatching { parseUiNode(node.toString()) }.isFailure)
+        }
+        for (field in listOf("style", "selected", "icon")) {
+            val source = if (field == "icon") icon else compact
+            val bad = listOf(JSONObject.NULL, 1, "unknown", JSONArray(), JSONObject()) +
+                (if (field == "selected") emptyList() else listOf(false))
+            for (value in bad) reject(JSONObject(source).put(field, value))
+        }
+        reject(JSONObject(icon).apply { remove("icon") })
+        reject(JSONObject(icon).put("selected", false))
+        reject(JSONObject(compact).put("icon", "refresh"))
+        reject(JSONObject(compact).apply { remove("style") })
+        reject(JSONObject(icon).apply { remove("style") })
+        reject(JSONObject("""{"@type":"emulator_header","devices":[],"refreshEvent":["Refresh"]}"""))
+    }
+
+    @Test
+    fun emulatorHeaderAppearanceAndTargets() {
+        var dark by mutableStateOf(false)
+        var scale by mutableStateOf(1.25f)
+        var density = 1f
+        var fill = Color.Unspecified
+        var selectedFill = Color.Unspecified
+        var inactiveFill = Color.Unspecified
+        var outline = Color.Unspecified
+        var selectedText = Color.Unspecified
+        var inactiveText = Color.Unspecified
+        composeRule.setContent {
+            density = LocalDensity.current.density
+            CompositionLocalProvider(LocalDensity provides Density(density, scale)) {
+                MyApplicationTheme(darkTheme = dark) {
+                    val colors = MaterialTheme.colorScheme
+                    fill = colors.surfaceContainerLow
+                    selectedFill = colors.surfaceContainerHigh
+                    inactiveFill = colors.surfaceContainer
+                    outline = colors.outlineVariant
+                    selectedText = colors.onSurface
+                    inactiveText = colors.onSurfaceVariant
+                    UiNodeContent(parseUiNode(emulatorHeaderJson()), {}, { _, _ -> }, false,
+                        modifier = Modifier.width(600.dp).testTag("header"))
+                }
+            }
+        }
+        for (isDark in listOf(false, true)) for (fontScale in listOf(1.25f, 2f)) {
+            composeRule.runOnIdle { dark = isDark; scale = fontScale }
+            val first = composeRule.onNodeWithText("Device 1")
+            val second = composeRule.onNodeWithText("Device 2")
+            val refresh = composeRule.onNodeWithContentDescription("Обновить список эмуляторов")
+            for (target in listOf(first, second, refresh))
+                target.assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp)
+            val root = composeRule.onNodeWithTag("header").fetchSemanticsNode().boundsInRoot
+            val a = first.fetchSemanticsNode().boundsInRoot
+            val b = second.fetchSemanticsNode().boundsInRoot
+            val r = refresh.fetchSemanticsNode().boundsInRoot
+            assertEquals(4f * density, b.left - a.right, 1f)
+            assertTrue(b.right <= r.left)
+            assertEquals(12f * density, a.left - root.left, 1f)
+            assertEquals(12f * density, root.right - r.right, 1f)
+            val pixels = composeRule.onNodeWithTag("header").captureToImage().asAndroidBitmap()
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            File(context.getExternalFilesDir(null), "emulator-header-$isDark-$fontScale.png").outputStream().use {
+                pixels.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            assertEquals(fill.toArgb(), pixels.getPixel(1, pixels.height / 2))
+            assertEquals(outline.toArgb(), pixels.getPixel(pixels.width / 2, pixels.height - 1))
+            for ((index, target) in listOf(first, second).withIndex()) {
+                val layouts = mutableListOf<TextLayoutResult>()
+                target.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+                val text = layouts.single()
+                assertTrue(!text.hasVisualOverflow)
+                assertEquals(1, text.lineCount)
+                assertEquals(12.sp, text.layoutInput.style.fontSize)
+                assertEquals(18.sp, text.layoutInput.style.lineHeight)
+                assertEquals(0.sp, text.layoutInput.style.letterSpacing)
+                assertEquals(if (index == 0) FontWeight.Medium else FontWeight.Normal, text.layoutInput.style.fontWeight)
+                assertEquals(if (index == 0) selectedText else inactiveText, text.layoutInput.style.color)
+                val bounds = target.fetchSemanticsNode().boundsInRoot
+                val x = (bounds.center.x - root.left).toInt()
+                val top = (bounds.top - root.top).toInt()
+                assertEquals(outline.toArgb(), pixels.getPixel(x, top))
+                assertEquals((if (index == 0) selectedFill else inactiveFill).toArgb(),
+                    pixels.getPixel(x, top + (3 * density).toInt()))
+                assertEquals(fill.toArgb(), pixels.getPixel((bounds.left - root.left).toInt(), top))
+            }
+        }
+    }
+
+    @Test
+    fun emulatorHeaderActionsAreIndependentAndAccessible() {
+        val events = mutableListOf<UiEvent>()
+        var selectedId by mutableStateOf(1)
+        lateinit var inputMode: InputModeManager
+        composeRule.setContent {
+            inputMode = LocalInputModeManager.current
+            MyApplicationTheme {
+                UiNodeContent(parseUiNode(emulatorHeaderJson(selected = selectedId)), events::add, { _, _ -> }, false,
+                    modifier = Modifier.width(600.dp))
+            }
+        }
+        val selected = composeRule.onNodeWithText("Device 1")
+        val inactive = composeRule.onNodeWithText("Device 2")
+        val refresh = composeRule.onNodeWithContentDescription("Обновить список эмуляторов")
+        selected.assertIsSelected()
+        inactive.assertIsNotSelected().performTouchInput { click(center) }
+        inactive.assertIsNotSelected()
+        refresh.performClick()
+        assertEquals(listOf("""["Select","emulator-2"]""", """["Refresh"]"""), events.map { it.json })
+        composeRule.runOnIdle { assertTrue(inputMode.requestInputMode(InputMode.Keyboard)) }
+        for (target in listOf(inactive, refresh)) {
+            target.performSemanticsAction(SemanticsActions.RequestFocus) { assertTrue(it()) }
+            target.performKeyInput { keyDown(Key.Enter); keyUp(Key.Enter) }
+            target.performKeyInput { keyDown(Key.Spacebar); keyUp(Key.Spacebar) }
+        }
+        assertEquals(listOf("""["Select","emulator-2"]""", """["Select","emulator-2"]""", """["Refresh"]""", """["Refresh"]"""), events.drop(2).map { it.json })
+        for (event in events) assertTrue(JSONObject(eventRequest(event, null)).isNull("value"))
+        selected.performSemanticsAction(SemanticsActions.RequestFocus) { assertTrue(it()) }
+        selected.performKeyInput { keyDown(Key.Tab); keyUp(Key.Tab) }
+        inactive.assertIsFocused().performKeyInput { keyDown(Key.Tab); keyUp(Key.Tab) }
+        refresh.assertIsFocused()
+        composeRule.runOnIdle { selectedId = 2 }
+        selected.assertIsNotSelected()
+        inactive.assertIsSelected()
+    }
+
+    @Test
+    fun emulatorHeaderBlocksBusyAndCancelledActions() {
+        val events = mutableListOf<UiEvent>()
+        var busy by mutableStateOf(true)
+        composeRule.setContent {
+            MyApplicationTheme {
+                UiNodeContent(parseUiNode(emulatorHeaderJson(12)), events::add, { _, _ -> }, busy,
+                    modifier = Modifier.width(320.dp))
+            }
+        }
+        val targets = listOf(composeRule.onNodeWithText("Device 1"),
+            composeRule.onNodeWithContentDescription("Обновить список эмуляторов"))
+        for (target in targets) target.assertIsNotEnabled().performTouchInput { click(center) }
+        composeRule.runOnIdle { busy = false }
+        for (target in targets) target.performTouchInput { down(center); cancel() }
+        composeRule.onNode(hasScrollAction()).performTouchInput { swipeLeft(durationMillis = 700) }
+        composeRule.runOnIdle { assertTrue(events.isEmpty()) }
+    }
+
+    @Test
+    fun emulatorHeaderOverflowPreservesRefreshAndPreview() {
+        val longName = "A very long emulator device name without truncation"
+        var dark by mutableStateOf(false)
+        var scale by mutableStateOf(1.25f)
+        var refreshVersion by mutableStateOf(0)
+        var empty by mutableStateOf(false)
+        val events = mutableListOf<UiEvent>()
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, scale)) {
+                MyApplicationTheme(darkTheme = dark) {
+                    val json = emulatorHeaderJson(if (empty) 0 else 12,
+                        refresh = """["Refresh",$refreshVersion]""", lastLabel = longName)
+                    UiNodeContent(UiNode.Row(listOf(UiNode.Text("Left"), UiNode.Column(listOf(
+                        parseUiNode(json), UiNode.Text("Preview")), padding = UiPadding(8, 8, 8, 8))),
+                        weights = listOf(2f, 1f), gap = UiGap(1, ThemeColor.OutlineVariant)),
+                        events::add, { _, _ -> }, false, modifier = Modifier.width(400.dp).testTag("narrow"))
+                }
+            }
+        }
+        for (isDark in listOf(false, true)) for (fontScale in listOf(1.25f, 2f)) {
+            composeRule.runOnIdle { dark = isDark; scale = fontScale }
+            val refresh = composeRule.onNodeWithContentDescription("Обновить список эмуляторов")
+            refresh.assertIsDisplayed().assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp)
+            val refreshBounds = refresh.fetchSemanticsNode().boundsInRoot
+            val previewBounds = composeRule.onNodeWithText("Preview").fetchSemanticsNode().boundsInRoot
+            composeRule.onNode(hasScrollAction()).performScrollToNode(hasText(longName))
+            val name = composeRule.onNodeWithText(longName)
+            val layouts = mutableListOf<TextLayoutResult>()
+            name.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+            assertEquals(longName, layouts.single().layoutInput.text.text)
+            assertTrue(!layouts.single().hasVisualOverflow)
+            val scroll = composeRule.onNode(hasScrollAction()).fetchSemanticsNode()
+                .config[androidx.compose.ui.semantics.SemanticsProperties.HorizontalScrollAxisRange].value()
+            assertTrue(scroll > 0)
+            composeRule.runOnIdle { refreshVersion++ }
+            assertEquals(scroll, composeRule.onNode(hasScrollAction()).fetchSemanticsNode()
+                .config[androidx.compose.ui.semantics.SemanticsProperties.HorizontalScrollAxisRange].value())
+            assertEquals(refreshBounds, refresh.fetchSemanticsNode().boundsInRoot)
+            assertEquals(previewBounds, composeRule.onNodeWithText("Preview").fetchSemanticsNode().boundsInRoot)
+            val pixels = composeRule.onNodeWithTag("narrow").captureToImage().asAndroidBitmap()
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            File(context.getExternalFilesDir(null), "emulator-header-overflow-$isDark-$fontScale.png").outputStream().use {
+                pixels.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            assertTrue(refreshBounds.right <= composeRule.onNodeWithTag("narrow").fetchSemanticsNode().boundsInRoot.right)
+            composeRule.onNode(hasScrollAction()).performScrollToNode(hasText("Device 1"))
+            composeRule.runOnIdle { assertTrue(events.isEmpty()) }
+        }
+        composeRule.runOnIdle { empty = true }
+        composeRule.onNodeWithContentDescription("Обновить список эмуляторов").assertIsDisplayed().performClick()
+        assertEquals(listOf(UiEvent("""["Refresh",4]""")), events)
+    }
+
     private fun tabStripJson(count: Int = 2, selected: Int = 1): String {
         val tabs = (1..count).joinToString(",") {
             """{"id":"$it","label":"Tab $it","selected":${it == selected},"selectEvent":["Select",$it],"closeEvent":["Close",$it]}"""
@@ -729,6 +949,7 @@ class BackendUiParserTest {
                     ThemeColor.Background -> colors.background.toArgb()
                     ThemeColor.Surface -> colors.surface.toArgb()
                     ThemeColor.SurfaceContainer -> colors.surfaceContainer.toArgb()
+                    ThemeColor.SurfaceContainerLow -> colors.surfaceContainerLow.toArgb()
                     ThemeColor.Primary -> colors.primary.toArgb()
                     ThemeColor.PrimaryContainer -> colors.primaryContainer.toArgb()
                     ThemeColor.OutlineVariant -> colors.outlineVariant.toArgb()
@@ -803,6 +1024,7 @@ class BackendUiParserTest {
                     null, ThemeColor.Surface -> colors.surface
                     ThemeColor.Background -> colors.background
                     ThemeColor.SurfaceContainer -> colors.surfaceContainer
+                    ThemeColor.SurfaceContainerLow -> colors.surfaceContainerLow
                     ThemeColor.Primary -> colors.primary
                     ThemeColor.PrimaryContainer -> colors.primaryContainer
                     ThemeColor.OutlineVariant -> colors.outlineVariant
@@ -914,8 +1136,7 @@ class BackendUiParserTest {
                 // Same outer two-child column and nested content as Emulator.view.
                 val panel = UiNode.Column(
                     listOf(UiNode.Column(emptyList()), UiNode.Column(listOf(
-                        UiNode.Text("Emulators"),
-                        UiNode.Row(listOf(UiNode.Button("Refresh", UiEvent("[\"Refresh\"]")))),
+                        parseUiNode(emulatorHeaderJson(0)),
                         if (preview) UiNode.Image("/emulators/emulator-5554/screenshot.png", "Pixel", UiEvent("[\"Tap\"]"))
                         else UiNode.Text("No running emulators"),
                     ))),
@@ -940,7 +1161,8 @@ class BackendUiParserTest {
                     composeRule.onAllNodes(androidx.compose.ui.test.hasTestTag("image")).fetchSemanticsNodes().isNotEmpty()
                 }
                 val panes = composeRule.onNodeWithTag("panes").fetchSemanticsNode().boundsInRoot
-                val title = composeRule.onNodeWithText("Emulators").fetchSemanticsNode().boundsInRoot
+                val title = (if (showPreview) composeRule.onNodeWithTag("image")
+                    else composeRule.onNodeWithText("No running emulators")).fetchSemanticsNode().boundsInRoot
                 val image = composeRule.onNodeWithTag("screen").captureToImage().asAndroidBitmap()
                 assertEquals(background, image.getPixel(image.width - 1, image.height - 1))
                 assertEquals(background, image.getPixel(image.width - 1, 1))

@@ -1,8 +1,13 @@
+# Communication
+
+- Communicate with the user in Russian.
+
 # Engineering Approach
 
 - Implement only the behavior explicitly required now. Do not add speculative features, abstractions, configuration, extension points, or architecture for possible future needs.
 - Keep work within the task's stated scope. Track additional problems or improvements discovered along the way as separate GitHub issues instead of expanding the current task.
 - Prefer deleting code, reusing existing code, the standard library, and native platform features. Choose the smallest clear change that works.
+- Compose functionality from existing base components. Do not create new base components without explicit user approval. Treat any new base component as a significant change: before implementing it, explain to the user why it is needed and why existing components cannot be composed to meet the requirement, explicitly request permission, and wait for approval.
 - Do not handle hypothetical edge cases. Add handling only for an explicit requirement, a reproduced failure, or a trust-boundary risk involving security or data loss.
 - Do not introduce dependencies or boilerplate when a direct implementation is sufficient.
 - Mark an intentional shortcut with a `ponytail:` comment that states its limit and when it should be revisited.
@@ -13,6 +18,7 @@
 
 # OpenSpec
 
+- When developing an OpenSpec spec, include a task to review the implementation and fix all obvious or important findings before completing the work.
 - Before archiving a change, sync its delta specs into the main specs by default, without asking for confirmation, unless the user explicitly requests otherwise.
 
 # Design

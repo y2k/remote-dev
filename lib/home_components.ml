@@ -142,13 +142,26 @@ module Emulator = struct
           | Some error -> [ text ("Error: " ^ error) ]);
         column
           [
-            text ~style:Heading "Emulators";
-            row ~gap:(Gap.make 8)
-              (button ~event:Refresh "Refresh"
-              :: List.map
-                   (fun (emulator : Runtime.emulator) ->
-                     button ~event:(Select emulator.serial) emulator.name)
-                   emulators);
+            column ~stretch:true ~gap:(Gap.make 0)
+              [
+                row ~background:Surface_container_low
+                  ~padding:(Padding.symmetric ~horizontal:12 ~vertical:4)
+                  ~gap:(Gap.make 8) ~weights:[ 1; 0 ]
+                  [
+                    row ~horizontal_scroll:true ~gap:(Gap.make 4)
+                      (List.map
+                         (fun (emulator : Runtime.emulator) ->
+                           button ~event:(Select emulator.serial) ~style:Compact
+                             ~selected:(selected_emulator = Some emulator.serial)
+                             emulator.name)
+                         emulators);
+                    button ~event:Refresh ~style:Icon ~icon:Refresh_icon
+                      "Обновить список эмуляторов";
+                  ];
+                row ~background:Outline_variant
+                  ~padding:(Padding.only ~bottom:1 ())
+                  [];
+              ];
             preview;
           ];
       ]
