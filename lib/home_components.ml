@@ -525,7 +525,7 @@ module Session = struct
         header ~details_visible session;
         column ~stretch:true ~gap:(Gap.make 12) (List.map message messages);
         column (pending @ stop);
-        row ~weights:[ 1; 0 ]
+        row ~center_vertically:true ~weights:[ 1; 0 ]
           [
             edit ~text:prompt ~event:(Run_prompt "__VALUE__") "Prompt";
             voice_input ~event:(Set_prompt "__VALUE__");
