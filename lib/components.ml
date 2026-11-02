@@ -81,6 +81,7 @@ type 'event t =
       * 'event t list
   | Row of
       bool
+      * bool
       * int list option
       * theme_color option
       * Padding.t option
@@ -126,12 +127,13 @@ let column ?(stretch = false) ?weights ?background ?padding ?gap ?border
       Option.map spacing_size corner_radius,
       children )
 
-let row ?(horizontal_scroll = false) ?weights ?background ?padding ?gap ?border
-    ?corner_radius children =
+let row ?(horizontal_scroll = false) ?(center_vertically = false) ?weights
+    ?background ?padding ?gap ?border ?corner_radius children =
   if horizontal_scroll && Option.is_some weights then
     invalid_arg "A horizontally scrolling row cannot have weights";
   Row
     ( horizontal_scroll,
+      center_vertically,
       weights,
       background,
       padding,
@@ -180,6 +182,7 @@ let rec map f = function
           List.map (map f) children )
   | Row
       ( horizontal_scroll,
+        center_vertically,
         weights,
         background,
         padding,
@@ -189,6 +192,7 @@ let rec map f = function
         children ) ->
       Row
         ( horizontal_scroll,
+          center_vertically,
           weights,
           background,
           padding,
@@ -335,6 +339,7 @@ let rec to_json event = function
         | None -> fields)
   | Row
       ( horizontal_scroll,
+        center_vertically,
         weights,
         background,
         padding,
@@ -348,6 +353,8 @@ let rec to_json event = function
           ("children", `List (List.map (to_json event) children));
         ]
         @ (if horizontal_scroll then [ ("horizontalScroll", `Bool true) ]
+           else [])
+        @ (if center_vertically then [ ("centerVertically", `Bool true) ]
            else [])
         @ color_fields "background" background
         @ spacing_fields padding gap

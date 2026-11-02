@@ -222,27 +222,53 @@ emulator panel second:
 }
 ```
 
-The selected screen uses a weighted column inside the left pane. Transcript or Claude output gets the remaining height while controls remain content-sized. For example, an OpenCode session has this inner shape:
+The selected screen uses a weighted column inside the left pane. Transcript or Claude output gets the remaining height while controls remain content-sized. OpenCode shows its title, status, and a `Сведения` button in a compact horizontal header below the unchanged tabs. The button reveals the full directory below that row and hides it on another tap. Details start collapsed for each opened chat and retain their state across refresh and tab switching. Long titles, paths, and retry details wrap without truncation. Each message has a separate `Вы` or `OpenCode` label and a rounded themed block: user messages are offset right, assistant messages left. Blocks occupy 5/6 of the transcript width and preserve the original text and line breaks. For example, an empty standalone OpenCode session has this inner shape (tab content wraps the same events with its tab identity):
 
 ```json
 {
   "@type": "column",
+  "stretch": true,
+  "gap": { "size": 8 },
   "children": [
     { "@type": "column", "children": [] },
-    { "@type": "text", "text": "OpenCode session" },
-    { "@type": "text", "text": "Session title" },
-    { "@type": "text", "text": "/path/to/project" },
-    { "@type": "text", "text": "Status: idle" },
-    { "@type": "column", "children": [] },
+    {
+      "@type": "column",
+      "stretch": true,
+      "background": "surfaceContainerLow",
+      "padding": { "start": 12, "top": 0, "end": 12, "bottom": 0 },
+      "gap": { "size": 4 },
+      "cornerRadius": 12,
+      "children": [
+        {
+          "@type": "row",
+          "weights": [4, 1, 0],
+          "centerVertically": true,
+          "gap": { "size": 8 },
+          "children": [
+            { "@type": "text", "text": "Session title", "style": "sessionTitle" },
+            { "@type": "text", "text": "Status: idle", "style": "caption" },
+            { "@type": "button", "label": "Сведения", "style": "compact", "event": ["Session_msg", ["Toggle_details"]] }
+          ]
+        }
+      ]
+    },
+    { "@type": "column", "stretch": true, "gap": { "size": 12 }, "children": [] },
     { "@type": "column", "children": [] },
     {
-      "@type": "input",
-      "label": "Prompt",
-      "event": ["Session_msg", ["Run_prompt", "__VALUE__"]],
-      "text": ""
+      "@type": "row",
+      "weights": [1, 0],
+      "children": [
+        {
+          "@type": "input",
+          "label": "Prompt",
+          "event": ["Session_msg", ["Run_prompt", "__VALUE__"]],
+          "text": ""
+        },
+        { "@type": "voice_input", "event": ["Session_msg", ["Set_prompt", "__VALUE__"]] }
+      ]
     }
   ],
-  "weights": [0, 0, 0, 0, 0, 1, 0, 0]
+  "weights": [0, 0, 1, 0, 0]
 }
 ```
 

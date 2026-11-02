@@ -137,12 +137,23 @@ let () =
                (T.Content (1, 1, T.Sessions_event (L.Created (Error "forged")))));
           ignore (event "Создать новую сессию" listed);
           ignore (click environment "ses_existing");
-          assert (has_text "User: previous conversation" (document environment));
+          assert (has_text "previous conversation" (document environment));
+          assert (not (has_text folder (document environment)));
+          assert (not (has_text "OpenCode session" (document environment)));
+          let strip = find "@type" "tab_strip" (document environment) in
+          let before_details = !calls in
+          assert (has_text folder (click environment "Сведения"));
+          assert (find "@type" "tab_strip" (document environment) = strip);
+          assert (not (has_text folder (click environment "Сведения")));
+          assert (has_text folder (click environment "Сведения"));
+          assert (!calls = before_details);
+          assert (has_text folder (refresh environment));
           let loaded_calls = !calls in
           ignore (click environment "+");
           assert (has_text "Directories" (document environment));
           ignore (click environment "Tab 1");
-          assert (has_text "User: previous conversation" (document environment));
+          assert (has_text "previous conversation" (document environment));
+          assert (has_text folder (document environment));
           assert (!calls = loaded_calls);
           assert (has_text "OpenCode sessions:" (back environment));
           assert (has_text "Directories" (back environment));
@@ -169,7 +180,9 @@ let () =
           fail_detail := true;
           let created = click environment "Создать новую сессию" in
           assert (!creations = 2);
-          assert (has_text "OpenCode session" created);
+          assert (not (has_text "OpenCode session" created));
+          assert (not (has_text folder created));
+          ignore (event "Сведения" created);
           assert (has_text "ses_new" created);
           ignore (event "Prompt" created);
           assert (
@@ -380,7 +393,7 @@ let () =
       assert (
         has_text "Error: Failure(\"command failed\")" (document environment));
       let refreshed = refresh environment in
-      assert (has_text "Assistant: updated answer" refreshed);
+      assert (has_text "updated answer" refreshed);
       assert (has_text "Needs input in OpenCode" refreshed);
       List.iter
         (fun message ->

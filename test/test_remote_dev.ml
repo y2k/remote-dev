@@ -1299,7 +1299,7 @@ let () =
     | Remote_dev.Components.Column (stretch, _, _, _, _, _, _, children) ->
         (stretch && children = buttons)
         || List.exists (has_button_column buttons) children
-    | Remote_dev.Components.Row (_, _, _, _, _, _, _, children) ->
+    | Remote_dev.Components.Row (_, _, _, _, _, _, _, _, children) ->
         List.exists (has_button_column buttons) children
     | _ -> false
   in
@@ -1325,6 +1325,7 @@ let () =
             (function
               | Row
                   ( _,
+                    _,
                     Some [ 1; 0 ],
                     _,
                     _,
@@ -1551,6 +1552,10 @@ let () =
         [
           { Remote_dev.Runtime.role = User; text = "question" };
           { role = Assistant; text = "answer" };
+          {
+            role = Assistant;
+            text = "Продолжение\n/home/user/projects/example";
+          };
         ];
       needs_input = true;
     }
@@ -1569,17 +1574,60 @@ let () =
       (Home_components.Session.Set_prompt "voice")
   in
   assert (voiced.prompt = "voice" && Cmd.run cmd = None);
+  let detailed, cmd =
+    Home_components.Session.update voiced Home_components.Session.Toggle_details
+  in
+  assert (Cmd.run cmd = None);
+  assert (detailed.details_visible && not voiced.details_visible);
+  assert (detailed.prompt = "voice" && detailed.messages = voiced.messages);
+  let collapsed, cmd =
+    Home_components.Session.update detailed
+      Home_components.Session.Toggle_details
+  in
+  assert (Cmd.run cmd = None && collapsed = voiced);
   assert_voice_row "Prompt" "voice"
     (Home_components.Session.Set_prompt "__VALUE__")
     (Home_components.Session.view voiced);
-  assert (has_text "User: question" selected_document);
-  assert (has_text "Assistant: answer" selected_document);
+  assert (has_text "Вы" selected_document);
+  assert (has_text "OpenCode" selected_document);
+  assert (has_text "question" selected_document);
+  assert (has_text "answer" selected_document);
+  let rec text_values = function
+    | `Assoc fields -> (
+        match List.assoc_opt "text" fields with
+        | Some (`String value) -> [ value ]
+        | _ -> List.concat_map (fun (_, value) -> text_values value) fields)
+    | `List values -> List.concat_map text_values values
+    | _ -> []
+  in
+  let chat =
+    Home_components.Session.view loaded_model
+    |> Remote_dev.Components.to_json Home_components.Session.msg_to_yojson
+  in
+  let header_row =
+    chat |> J.Util.member "children" |> J.Util.to_list |> fun children ->
+    List.nth children 1 |> J.Util.member "children" |> J.Util.to_list |> List.hd
+  in
+  assert (J.Util.member "centerVertically" header_row = `Bool true);
+  let transcript =
+    chat |> J.Util.member "children" |> J.Util.to_list |> fun children ->
+    List.nth children 2
+  in
+  assert (
+    text_values transcript
+    = [
+        "Вы";
+        "question";
+        "OpenCode";
+        "answer";
+        "OpenCode";
+        "Продолжение\n/home/user/projects/example";
+      ]);
   assert (has_text "Needs input in OpenCode" selected_document);
   assert (
     Option.is_some
       (find_weighted_column
-         (`List
-            [ `Int 0; `Int 0; `Int 0; `Int 0; `Int 0; `Int 1; `Int 0; `Int 0 ])
+         (`List [ `Int 0; `Int 0; `Int 1; `Int 0; `Int 0 ])
          selected_document));
   assert (
     has_event
@@ -1767,10 +1815,10 @@ let () =
   in
   assert (status = `OK);
   let refreshed = stream_documents body |> List.rev |> List.hd in
-  assert (has_text "Assistant: refreshed" refreshed);
+  assert (has_text "refreshed" refreshed);
   assert (has_text "Status: retry: later" refreshed);
   assert (has_text "Needs input in OpenCode" refreshed);
-  assert (not (has_text "User: question" refreshed));
+  assert (not (has_text "question" refreshed));
   assert (
     refreshed
     |> has_text

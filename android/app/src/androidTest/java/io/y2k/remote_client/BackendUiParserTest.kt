@@ -694,6 +694,20 @@ class BackendUiParserTest {
     }
 
     @Test
+    fun parsesOptionalVerticalCentering() {
+        assertEquals(UiNode.Row(emptyList()), parseUiNode("""{"@type":"row","children":[]}"""))
+        for (value in listOf(false, true)) {
+            assertEquals(UiNode.Row(emptyList(), centerVertically = value),
+                parseUiNode("""{"@type":"row","children":[],"centerVertically":$value}"""))
+        }
+        for (value in listOf("null", "1", "\"true\"", "[]", "{}")) {
+            assertTrue("Accepted centerVertically=$value", runCatching {
+                parseUiNode("""{"@type":"row","children":[],"centerVertically":$value}""")
+            }.exceptionOrNull() is IllegalArgumentException)
+        }
+    }
+
+    @Test
     fun rejectsInvalidHorizontalScroll() {
         for (value in listOf("null", "1", "\"true\"", "[]", "{}")) {
             assertTrue("Accepted horizontalScroll=$value", runCatching {
@@ -2040,16 +2054,6 @@ class BackendUiParserTest {
         }
 
         composeRule.onNodeWithTag("refresh").performTouchInput { swipeDown() }
-        composeRule.runOnIdle { assertTrue(refreshed) }
-    }
-
-    @Test
-    fun refreshMenuInvokesRootRefreshAction() {
-        var refreshed = false
-        composeRule.setContent { RefreshMenu { refreshed = true } }
-
-        composeRule.onNodeWithText("Refresh").performClick()
-
         composeRule.runOnIdle { assertTrue(refreshed) }
     }
 

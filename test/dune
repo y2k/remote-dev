@@ -11,7 +11,7 @@
 (test
  (name test_folder_tabs)
  (modules test_folder_tabs)
- (libraries remote_dev eio_main unix yojson))
+ (libraries remote_dev unix yojson))
 
 (test
  (name test_remote_dev)

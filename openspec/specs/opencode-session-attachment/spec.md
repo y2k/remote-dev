@@ -71,7 +71,7 @@ The OpenCode session-list screen SHALL list at most the 20 most recently updated
 - **THEN** it displays zero tabs and the tab creation control instead of loading sessions
 
 ### Requirement: Render the selected session transcript
-Selecting a session SHALL load its V2 messages by server-supplied session ID and display title, directory, status, and all user and assistant text in conversation order across all pages. User `text` and assistant textual `content` SHALL be rendered; other message types and non-text content SHALL NOT be rendered. A missing title SHALL display as `Без названия` without renaming the OpenCode session.
+Selecting a session SHALL load its V2 messages by server-supplied session ID and display title, status, and all user and assistant text in conversation order across all pages, with the full directory available through session details. User `text` and assistant textual `content` SHALL be rendered; other message types and non-text content SHALL NOT be rendered. A missing title SHALL display as `Без названия` without renaming the OpenCode session.
 
 #### Scenario: Session has a conversation
 - **WHEN** the selected session contains user and assistant text
@@ -271,3 +271,73 @@ Activating a session card SHALL select that exact session through its existing e
 #### Scenario: Refresh fails with loaded cards
 - **WHEN** session refresh fails after a successful load
 - **THEN** previous cards and folder context remain visible with the error and the existing retry and Back actions remain available
+
+### Requirement: Selected session header presentation
+The selected OpenCode chat SHALL show a compact horizontal header with its title, current status, and a session-details control outside transcript scrolling. It SHALL omit the `OpenCode session` caption and hide the directory by default. It SHALL use existing system-font typography, preserve full title and retry text by wrapping when necessary, and leave the existing tab strip unchanged.
+
+#### Scenario: Display session context
+- **WHEN** an OpenCode chat is displayed
+- **THEN** its compact header shows the selected session's title, status, and details control in one horizontal row
+- **AND** retry status retains its full existing detail and an untitled session retains `Без названия`
+- **AND** no standalone `OpenCode session` caption or directory row occupies height by default
+- **AND** the title, status, and details control are vertically centered within the row
+
+#### Scenario: Long context at increased font scale
+- **WHEN** the title or retry text exceeds the available width at 125% system font scale
+- **THEN** the full value wraps within its allocated header region without horizontal scrolling or truncation
+- **AND** the details control remains operable
+
+#### Scenario: Existing tabs remain intact
+- **WHEN** a selected session uses the compact header
+- **THEN** tab labels, dimensions, spacing, placement, selection, close and add controls remain unchanged
+- **AND** the session title stays below the tab strip rather than replacing a tab label
+
+### Requirement: Role-separated chat messages
+Each user and assistant text message SHALL appear in its own rounded, padded block with a separate role label, respectively `Вы` and `OpenCode`. User blocks SHALL be offset to the right with an accent background; assistant blocks SHALL be offset to the left with a neutral background. The complete original text and conversation order SHALL be preserved using the existing system font in both themes.
+
+#### Scenario: Mixed conversation
+- **WHEN** a conversation contains user and assistant messages, including consecutive messages of the same role
+- **THEN** every message retains its own role label and block in the original order
+- **AND** role names are not prepended to the message body
+
+#### Scenario: Long and multiline messages
+- **WHEN** a message contains Cyrillic, line breaks, or a path longer than the available width
+- **THEN** the text wraps within its block, preserves its content and line breaks, and remains accessible through vertical scrolling
+
+#### Scenario: Theme change
+- **WHEN** the client renders the chat in light or dark mode
+- **THEN** the blocks use themed accent and neutral backgrounds with readable text and distinguishable roles
+
+### Requirement: Styled chat preserves controls and scrolling
+The styled transcript SHALL occupy the remaining chat height and scroll independently of the header and existing prompt and voice-input controls. Styling SHALL preserve session action events, pending-input notices, errors, and busy-only Stop behavior. Message blocks SHALL NOT introduce actions or fabricated metadata; the header SHALL add only the session-details toggle.
+
+#### Scenario: Overflowing conversation
+- **WHEN** the transcript exceeds the available chat height
+- **THEN** scrolling reveals its messages while the header and prompt controls remain stationary
+- **AND** the prompt submission and voice-input actions retain their existing behavior
+
+#### Scenario: Empty conversation
+- **WHEN** the selected session has no messages
+- **THEN** the header and prompt controls remain available without fabricated messages or timestamps
+
+#### Scenario: Session needs attention
+- **WHEN** the selected chat has an error, pending input, or busy status
+- **THEN** existing errors and pending-input notices remain visible and Stop is offered only for busy status
+- **AND** the styled message blocks do not expose permission or question-answer controls
+
+### Requirement: Toggle selected session details
+The chat SHALL provide a `Сведения` control that reveals the complete selected-session directory below the compact header and can hide it again. Details SHALL start collapsed when opening a session, survive refresh and tab switching for that open chat, and belong only to that chat. Toggling details SHALL preserve server-held prompt and transcript state without sending an OpenCode request.
+
+#### Scenario: Reveal and hide directory
+- **WHEN** the user activates `Сведения` in a newly opened chat
+- **THEN** the full directory appears below the compact row, wrapping as needed
+- **AND** activating the control again hides it and returns the height to the transcript
+
+#### Scenario: Refresh or switch tabs
+- **WHEN** the user refreshes a chat with details expanded or switches away and back
+- **THEN** that chat retains its expanded state and reflects current session data
+- **AND** other chats retain their own details state
+
+#### Scenario: Toggle without reloading the session
+- **WHEN** the user toggles session details
+- **THEN** server-held prompt and transcript state remain intact and no OpenCode request is made

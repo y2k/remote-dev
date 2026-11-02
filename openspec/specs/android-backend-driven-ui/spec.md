@@ -15,7 +15,7 @@ The Android client SHALL request the initial UI document with `GET /` to the con
 
 #### Scenario: Load fails
 - **WHEN** the endpoint cannot be reached or its response cannot be parsed as a supported UI document
-- **THEN** the client displays an error while keeping pull-to-refresh and the `Refresh` menu item available
+- **THEN** the client displays an error while keeping pull-to-refresh available
 
 ### Requirement: Render streamed UI documents for commands
 The Android client SHALL read an `application/x-ndjson` UI-event response line by line and replace the displayed UI document for every valid complete document until the response closes.
@@ -25,18 +25,18 @@ The Android client SHALL read an `application/x-ndjson` UI-event response line b
 - **THEN** the client renders each document in response order and permits the next UI event after the response closes
 
 ### Requirement: Manual reload control
-The Android client SHALL send the provider-neutral root Refresh event when the user pulls down at the beginning of the screen content or activates the single menu item labelled `Refresh`. The client SHALL NOT display a separate `Reload` or `Retry` button.
+The Android client SHALL send the provider-neutral root Refresh event when the user pulls down at the beginning of the screen content. The client SHALL NOT display a client-owned `Refresh` menu item or a separate `Reload` or `Retry` button. Backend-defined refresh controls SHALL retain their existing behavior.
 
 #### Scenario: User reloads the document
 - **WHEN** the user pulls down while the screen content is at its beginning
 - **THEN** the client sends Refresh and replaces the displayed state with the returned UI document
 
 #### Scenario: User selects Refresh
-- **WHEN** the user activates the `Refresh` menu item
-- **THEN** the client sends Refresh and replaces the displayed state with the returned UI document
+- **WHEN** the user looks for the former global `Refresh` menu item
+- **THEN** that client-owned action is absent and manual document refresh is available through pull-to-refresh instead
 
 #### Scenario: Manual refresh is in progress
-- **WHEN** a request initiated by pull-to-refresh or `Refresh` is in progress
+- **WHEN** a request initiated by pull-to-refresh is in progress
 - **THEN** the client displays the refresh indicator until the request finishes
 
 ### Requirement: Supported UI nodes
@@ -159,11 +159,11 @@ The Android client SHALL expose a loading state while any backend-defined event 
 
 #### Scenario: Action succeeds
 - **WHEN** an event request returns a valid supported UI document
-- **THEN** the client replaces the displayed backend-driven content with the returned document
+- **THEN** the client replaces the displayed backend-driven content with that document
 
 #### Scenario: Action fails
 - **WHEN** an event request cannot be completed or its response is not a supported UI document
-- **THEN** the client displays an error while keeping pull-to-refresh and the `Refresh` menu item available
+- **THEN** the client displays an error while keeping pull-to-refresh available
 
 ### Requirement: Reject unsupported documents
 The Android client SHALL treat missing required fields, invalid field types, a `column` or `row` whose `weights` is not an array of one non-negative finite number per child, and node types other than `column`, `row`, `text`, `button`, `input`, `image`, `voice_input`, `card`, or `tab_strip` as parse failures.
@@ -252,10 +252,10 @@ The Android client SHALL declare `ACCESS_LOCAL_NETWORK` and SHALL obtain that ru
 
 #### Scenario: User denies local network access
 - **WHEN** the client runs on Android 17 or higher and the user denies local network access
-- **THEN** the client displays an error without making the endpoint request and keeps pull-to-refresh and the `Refresh` menu item available
+- **THEN** the client displays an error without making the endpoint request and keeps pull-to-refresh available
 
 #### Scenario: User retries local network permission
-- **WHEN** local network access is denied and the user pulls to refresh or activates the `Refresh` menu item
+- **WHEN** local network access is denied and the user pulls to refresh
 - **THEN** the client requests local network permission again without requesting the development endpoint first
 
 #### Scenario: Client runs before Android 17
@@ -650,13 +650,13 @@ The backend composition API SHALL support optional uniform border width and requ
 - **THEN** events are mapped normally and every decoration and existing layout attribute retains its value and omission state
 
 ### Requirement: Graphite visual presentation
-The Android client SHALL follow the system light/dark appearance setting. In dark appearance it SHALL use a graphite background `#14171C`, control surfaces `#1D222A`, and primary action accent `#82AAFF`. Ordinary backend-defined text SHALL use the theme's foreground color rather than its primary action color, with light foreground text in dark appearance and legible dark foreground text in light appearance. The application header SHALL retain the `remote_dev` title and visible `Refresh` action. Content SHALL have consistent outer spacing and rounded input fields, while preserving the existing two-pane ratio, screen navigation, and weighted scrolling behavior.
+The Android client SHALL follow the system light/dark appearance setting. In dark appearance it SHALL use a graphite background `#14171C`, control surfaces `#1D222A`, and primary action accent `#82AAFF`. Ordinary backend-defined text SHALL use the theme's foreground color rather than its primary action color, with light foreground text in dark appearance and legible dark foreground text in light appearance. The client SHALL NOT render the application header with the `remote_dev` title and global `Refresh` action or reserve space for it. Content SHALL occupy the freed height while respecting system safe drawing insets. Content SHALL have consistent outer spacing and rounded input fields, while preserving the existing two-pane ratio, screen navigation, and weighted scrolling behavior.
 
 #### Scenario: Dark appearance
 - **WHEN** the client renders backend content with system dark appearance enabled
 - **THEN** the background, control surfaces, and primary actions use the graphite palette
 - **AND** ordinary text is light foreground text rather than blue accent text
-- **AND** the header displays `remote_dev` and an available Refresh action
+- **AND** no application header with `remote_dev` and global Refresh is displayed
 
 #### Scenario: Light appearance
 - **WHEN** the client renders backend content with system light appearance enabled
@@ -666,6 +666,11 @@ The Android client SHALL follow the system light/dark appearance setting. In dar
 - **WHEN** a session, worktree, or list screen is displayed with the new styling
 - **THEN** content and emulator panes retain their existing two-to-one width ratio
 - **AND** weighted content retains its scrolling behavior and navigation retains separate list and detail screens
+
+#### Scenario: Reclaim header space in every screen state
+- **WHEN** the client displays loading, content, a request failure, or a local-network permission error in either appearance
+- **THEN** there is no application header or blank space reserved for it
+- **AND** the screen content uses the freed height within system safe drawing insets
 
 ### Requirement: Visible input submission action
 Each input SHALL expose an arrow-shaped submit button within its rounded field. Activating it while no UI event request is in progress SHALL submit exactly one event request using the input's unchanged backend event and current locally edited value, with the same submission and response behavior as hardware Enter. The button SHALL have an accessible action description and a touch target of at least 48 dp. During a UI event request the button SHALL be disabled and SHALL NOT queue another submission. Existing hardware Enter submission, input preservation during requests and failures, and adjacent voice-input behavior SHALL remain available under their existing rules.
@@ -893,3 +898,34 @@ An available header action SHALL submit exactly one request containing its uncha
 #### Scenario: Busy or cancelled actions
 - **WHEN** a gesture is cancelled, becomes a scroll, or an action is attempted while a request is in progress
 - **THEN** no event is sent or queued
+
+### Requirement: Loading indication preserves content geometry
+While backend content is displayed, the Android client SHALL show an indeterminate linear loading indicator over its top edge during an event request. Showing or hiding this indicator SHALL NOT change the position or size allocated to the backend content. The indicator SHALL remain visible throughout streamed responses until the request finishes.
+
+#### Scenario: Request starts and finishes
+- **WHEN** an event request starts and then finishes with the same UI document
+- **THEN** the indicator appears and disappears without moving or resizing the displayed content
+
+#### Scenario: Streamed response
+- **WHEN** an event request delivers multiple UI documents before closing
+- **THEN** the indicator remains visible until the request ends without consuming content layout space
+
+#### Scenario: Failed request
+- **WHEN** an event request fails while existing content is displayed
+- **THEN** the indicator disappears and the existing error presentation and retained content remain available
+- **AND** removing the indicator itself does not change content geometry
+
+### Requirement: Optional vertical centering in rows
+The client SHALL accept an optional boolean `centerVertically` on `row` nodes. When true, all children, including weighted children, SHALL align to the row's vertical center. Omitted or false SHALL preserve top alignment. Invalid values SHALL cause a parse failure. Width allocation, wrapping, and row height SHALL retain their existing behavior.
+
+#### Scenario: Center mixed-height children
+- **WHEN** a row sets `centerVertically` to true and contains text and a taller button
+- **THEN** the text and button share a vertical center, including when weighted text wraps
+
+#### Scenario: Preserve existing rows
+- **WHEN** a row omits `centerVertically` or sets it to false
+- **THEN** its children retain top alignment
+
+#### Scenario: Reject invalid centering values
+- **WHEN** `centerVertically` is present with a non-boolean value, including null
+- **THEN** the document is rejected under the existing parse-failure behavior

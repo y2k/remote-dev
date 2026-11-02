@@ -420,6 +420,7 @@ end
 module Session = struct
   type model = {
     session : Runtime.opencode_session;
+    details_visible : bool;
     messages : Runtime.opencode_message list;
     needs_input : bool;
     prompt : string;
@@ -431,6 +432,7 @@ module Session = struct
 
   type msg =
     | Load
+    | Toggle_details
     | Loaded of (Runtime.opencode_detail, string) result
     | Missing
     | Run_prompt of string
@@ -451,6 +453,7 @@ module Session = struct
   let init session =
     ( {
         session;
+        details_visible = false;
         messages = [];
         needs_input = false;
         prompt = "";
@@ -464,21 +467,49 @@ module Session = struct
     | Runtime.Busy -> "busy"
     | Runtime.Retry message -> "retry: " ^ message
 
-  let view { session; messages; needs_input; prompt; error; background_error } :
-      msg Components.t =
+  let header ~details_visible (session : Runtime.opencode_session) =
+    column ~stretch:true ~background:Surface_container_low
+      ~padding:(Padding.symmetric ~horizontal:12 ~vertical:0)
+      ~gap:(Gap.make 4) ~corner_radius:12
+      ([
+         row ~center_vertically:true ~weights:[ 4; 1; 0 ] ~gap:(Gap.make 8)
+           [
+             text ~style:Session_title session.title;
+             text ~style:Caption ("Status: " ^ status session.status);
+             button ~style:Compact ~event:Toggle_details "Сведения";
+           ];
+       ]
+      @ if details_visible then [ text ~style:Code session.directory ] else [])
+
+  let message ({ Runtime.role; text = value } : Runtime.opencode_message) =
+    let label, background =
+      match role with
+      | Runtime.User -> ("Вы", Primary_container)
+      | Runtime.Assistant -> ("OpenCode", Surface_container)
+    in
+    let block =
+      column ~stretch:true ~background ~padding:(Padding.all 12)
+        ~gap:(Gap.make 4) ~corner_radius:12
+        [ text ~style:Caption label; text ~style:Body value ]
+    in
+    (* ponytail: fixed 5/6-width blocks; revisit for exact Stitch bubble sizing. *)
+    match role with
+    | Runtime.User -> row ~weights:[ 1; 5 ] [ column []; block ]
+    | Runtime.Assistant -> row ~weights:[ 5; 1 ] [ block; column [] ]
+
+  let view
+      {
+        session;
+        details_visible;
+        messages;
+        needs_input;
+        prompt;
+        error;
+        background_error;
+      } : msg Components.t =
     let errors =
       [ error; background_error ]
       |> List.filter_map (Option.map (fun error -> text ("Error: " ^ error)))
-    in
-    let messages =
-      List.map
-        (fun ({ Runtime.role; text = value } : Runtime.opencode_message) ->
-          text
-            ((match role with
-               | Runtime.User -> "User: "
-               | Runtime.Assistant -> "Assistant: ")
-            ^ value))
-        messages
     in
     let pending =
       if needs_input then [ text "Needs input in OpenCode" ] else []
@@ -488,14 +519,11 @@ module Session = struct
       | Runtime.Busy -> [ button ~event:Stop "Stop" ]
       | Runtime.Idle | Runtime.Retry _ -> []
     in
-    column ~stretch:true ~weights:[ 0; 0; 0; 0; 0; 1; 0; 0 ]
+    column ~stretch:true ~weights:[ 0; 0; 1; 0; 0 ] ~gap:(Gap.make 8)
       [
         column errors;
-        text ~style:Caption "OpenCode session";
-        text ~style:Heading session.title;
-        text ~style:Code session.directory;
-        text ~style:Caption ("Status: " ^ status session.status);
-        column messages;
+        header ~details_visible session;
+        column ~stretch:true ~gap:(Gap.make 12) (List.map message messages);
         column (pending @ stop);
         row ~weights:[ 1; 0 ]
           [
@@ -505,6 +533,8 @@ module Session = struct
       ]
 
   let update model = function
+    | Toggle_details ->
+        ({ model with details_visible = not model.details_visible }, Cmd.none)
     | Load -> ({ model with error = None }, load model.session)
     | Loaded (Ok detail) ->
         ( {

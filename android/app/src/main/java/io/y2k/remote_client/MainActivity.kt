@@ -21,15 +21,14 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -40,6 +39,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -124,6 +124,7 @@ sealed interface UiNode {
         val border: UiBorder? = null,
         val cornerRadius: Int = 0,
         val horizontalScroll: Boolean = false,
+        val centerVertically: Boolean = false,
     ) : UiNode
 
     data class Text(val text: String, val style: TextStyleRole = TextStyleRole.Body) : UiNode
@@ -259,7 +260,11 @@ private fun parseUiNode(node: JSONObject): UiNode {
                         ?: throw IllegalArgumentException("row horizontalScroll must be a boolean")
                 } else false
                 require(!horizontalScroll || weights == null) { "A horizontally scrolling row cannot have weights" }
-                UiNode.Row(parsedChildren, weights, background, padding, gap, border, cornerRadius, horizontalScroll)
+                val centerVertically = if (node.has("centerVertically")) {
+                    node.get("centerVertically") as? Boolean
+                        ?: throw IllegalArgumentException("row centerVertically must be a boolean")
+                } else false
+                UiNode.Row(parsedChildren, weights, background, padding, gap, border, cornerRadius, horizontalScroll, centerVertically)
             }
         }
         "text" ->
@@ -477,15 +482,6 @@ private fun App(client: HttpClient) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         contentWindowInsets = WindowInsets.safeDrawing,
-        topBar = {
-            TopAppBar(
-                title = { Text("remote_dev") },
-                actions = { RefreshMenu(::refresh) },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                ),
-            )
-        },
     ) { innerPadding ->
         RefreshableColumn(
             modifier =
@@ -503,7 +499,6 @@ private fun App(client: HttpClient) {
                 when (val current = state) {
                     ScreenState.Loading -> Text("Loading...")
                     is ScreenState.Content -> {
-                        if (eventInProgress) Text("Loading...")
                         Box(Modifier.weight(1f)) {
                             CompositionLocalProvider(LocalUiDocument provides current) {
                                 UiNodeContent(
@@ -514,6 +509,13 @@ private fun App(client: HttpClient) {
                                     loadImage = ::loadImage,
                                 )
                             }
+                            if (eventInProgress) {
+                                Box(Modifier.matchParentSize()) {
+                                    LinearProgressIndicator(
+                                        Modifier.fillMaxWidth().align(Alignment.TopCenter)
+                                    )
+                                }
+                            }
                         }
                         eventError?.let { Text("Error: $it") }
                     }
@@ -522,11 +524,6 @@ private fun App(client: HttpClient) {
             }
         }
     }
-}
-
-@Composable
-internal fun RefreshMenu(onRefresh: () -> Unit) {
-    TextButton(onClick = onRefresh) { Text("Refresh") }
 }
 
 @Composable

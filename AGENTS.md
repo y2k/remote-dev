@@ -18,6 +18,7 @@
 
 # OpenSpec
 
+- Use the OpenSpec workflow for all development.
 - When developing an OpenSpec spec, include a task to review the implementation and fix all obvious or important findings before completing the work.
 - Before archiving a change, sync its delta specs into the main specs by default, without asking for confirmation, unless the user explicitly requests otherwise.
 

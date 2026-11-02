@@ -237,6 +237,7 @@ fun UiNodeContent(
                         node.padding.start.dp, node.padding.top.dp, node.padding.end.dp, node.padding.bottom.dp,
                     ).then(gaps?.modifier(themeColor(node.gap.color)) ?: Modifier),
                 horizontalArrangement = Arrangement.spacedBy(node.gap.size.dp),
+                verticalAlignment = if (node.centerVertically) Alignment.CenterVertically else Alignment.Top,
             ) {
                 if (node.weights == null) {
                     node.children.forEachIndexed { index, child ->
